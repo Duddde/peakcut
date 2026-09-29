@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import nextConfig from "./next.config";
+import nextConfig, { buildContentSecurityPolicy } from "./next.config";
 
 async function getHeadersFor(pathname: string) {
   const rules = await nextConfig.headers!();
@@ -38,6 +38,24 @@ describe("next.config headers()", () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("media-src 'self' blob:");
     expect(csp).toContain("object-src 'none'");
+  });
+
+  it("allows eval only outside production, where React's dev build needs it", () => {
+    const dev = buildContentSecurityPolicy({ NODE_ENV: "development" } as unknown as NodeJS.ProcessEnv);
+    expect(dev).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval'");
+  });
+
+  it("never ships 'unsafe-eval' to production, where it would only weaken XSS protection", () => {
+    const prod = buildContentSecurityPolicy({ NODE_ENV: "production" } as unknown as NodeJS.ProcessEnv);
+    expect(prod).toContain("script-src 'self' 'unsafe-inline'");
+    expect(prod).not.toContain("unsafe-eval");
+  });
+
+  it("keeps every other directive identical between production and development", () => {
+    const strip = (csp: string) => csp.split("; ").filter((d) => !d.startsWith("script-src"));
+    expect(strip(buildContentSecurityPolicy({ NODE_ENV: "development" } as unknown as NodeJS.ProcessEnv))).toEqual(
+      strip(buildContentSecurityPolicy({ NODE_ENV: "production" } as unknown as NodeJS.ProcessEnv))
+    );
   });
 
   it("applies the header rule to every route", async () => {
