@@ -1,0 +1,46 @@
+# PeakCut background job worker — systemd unit TEMPLATE.
+#
+# This file is NOT installed or enabled by anything in this repository. It
+# is intentionally kept separate from the web app's own service (if any):
+# the worker runs real ffmpeg renders and calls real transcription/tracking
+# providers, which can be slow, and must never share a process/restart
+# policy with the request-serving Next.js server.
+#
+# To use it on a real host, after reviewing and adapting every placeholder
+# below:
+#   sudo cp deploy/peakcut-worker.service /etc/systemd/system/peakcut-worker.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now peakcut-worker.service
+#
+# This deliberately does NOT happen as part of any build/deploy script in
+# this repo — starting a long-running worker against a real database is a
+# deployment decision for a human to make explicitly, not something CI or
+# an agent should trigger as a side effect.
+
+[Unit]
+Description=PeakCut background job worker (transcription/analysis/tracking/render)
+After=network.target
+
+[Service]
+Type=simple
+# Adapt to your actual deployment path.
+WorkingDirectory=/opt/peakcut
+# Same env vars as the web app's PEAKCUT_DB_PATH, plus PEAKCUT_EXPORTS_DIR
+# for rendered output. Never put secret values directly in this unit file —
+# use an EnvironmentFile instead.
+EnvironmentFile=/etc/peakcut/worker.env
+ExecStart=/usr/bin/npx tsx scripts/run-job-worker.ts
+Restart=on-failure
+RestartSec=5
+# Graceful shutdown: the worker finishes any job currently in progress
+# after receiving SIGTERM (see scripts/run-job-worker.ts) rather than being
+# killed mid-render.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+# Run as a dedicated, unprivileged user — never as root.
+User=peakcut
+Group=peakcut
+
+[Install]
+WantedBy=multi-user.target

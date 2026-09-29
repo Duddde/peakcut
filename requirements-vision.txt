@@ -1,0 +1,17 @@
+# Optional Python dependencies for PeakCut's local face-detection tracker
+# (scripts/vision/track_faces.py). Not required to run the Node/Next.js app
+# or its test suite — only needed if you want the "local-subject" tracking
+# provider to use real OpenCV face detection instead of reporting itself
+# unavailable.
+#
+# Install into a dedicated virtual environment (never the system Python):
+#
+#   python3 -m venv .venv-vision
+#   source .venv-vision/bin/activate
+#   pip install -r requirements-vision.txt
+#
+# Compatible with Python 3.11 (the version this project was developed
+# against). No API keys or secrets are required by this dependency or by
+# track_faces.py — detection runs fully offline, locally, on-device.
+
+opencv-python-headless==4.10.0.84
