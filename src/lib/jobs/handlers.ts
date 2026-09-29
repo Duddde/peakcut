@@ -17,6 +17,12 @@ import { LocalSubjectTracker } from "@/lib/tracking/LocalSubjectTracker";
 import { AutoSubjectDetectionEngine } from "@/lib/tracking/AutoSubjectDetectionEngine";
 import { deriveCropFromTrack } from "@/lib/tracking/deriveCropFromTrack";
 import type { FrameTracker } from "@/lib/tracking/types";
+import { downloadYoutubeVideo } from "@/lib/youtube/downloadYoutubeVideo";
+import {
+  createYtDlpDownloader,
+  readDownloaderEnvConfig,
+  type VideoDownloader,
+} from "@/lib/youtube/videoDownloader";
 import type { JobHandler, JobHandlers } from "./worker";
 
 type TrackProviderId = "local-subject" | "stable-center-fallback";
@@ -34,8 +40,12 @@ export interface DefaultJobHandlersDeps {
   db: DatabaseSync;
   /** Base directory rendered clips are written under (a per-job .mp4 is created inside it). */
   exportsBaseDir: string;
+  /** Base directory downloaded sources are written under. Defaults to the PEAKCUT_DOWNLOADS_DIR / .data/downloads convention. */
+  downloadsBaseDir?: string;
   providers?: TranscriptProvider[];
   trackerFactory?: TrackerFactory;
+  /** Injected in tests; defaults to the real yt-dlp-backed downloader. */
+  videoDownloader?: VideoDownloader;
 }
 
 function loadProjectOrThrow(repo: SqliteProjectRepository, projectId: string | null): Project {
@@ -52,7 +62,7 @@ function loadProjectOrThrow(repo: SqliteProjectRepository, projectId: string | n
 function requireLocalMedia(project: Project): string {
   if (!project.source.localFilePath) {
     throw new Error(
-      "Aucun média local importé pour ce projet : PeakCut ne télécharge jamais automatiquement une source distante."
+      "Aucun fichier média disponible pour ce projet : importez un média local, ou lancez un job \"download\" pour récupérer la source YouTube."
     );
   }
   return project.source.localFilePath;
@@ -100,6 +110,21 @@ function buildWholeTranscriptSegment(
  */
 export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandlers {
   const projectRepo = new SqliteProjectRepository(deps.db);
+
+  let cachedDownloader: VideoDownloader | null = deps.videoDownloader ?? null;
+
+  /** Built lazily so a worker that never runs a download job never reads the downloader's env config. */
+  function resolveVideoDownloader(): VideoDownloader {
+    if (cachedDownloader) return cachedDownloader;
+    const env = readDownloaderEnvConfig();
+    cachedDownloader = createYtDlpDownloader({
+      baseDir: deps.downloadsBaseDir ?? env.baseDir,
+      binaryPath: env.binaryPath,
+      cookiesPath: env.cookiesPath,
+      limits: env.limits,
+    });
+    return cachedDownloader;
+  }
 
   const transcription: JobHandler = async ({ job }) => {
     const project = loadProjectOrThrow(projectRepo, job.projectId);
@@ -267,5 +292,58 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     };
   };
 
-  return { transcription, analysis, tracking, render };
+  /**
+   * Fetches the project's YouTube source to disk so the rest of the
+   * pipeline — transcription, tracking, export — has real bytes to work
+   * on. The URL comes from `payload.url` when the caller supplied one,
+   * otherwise from the project's own registered source, and is re-validated
+   * inside downloadYoutubeVideo before anything is fetched.
+   *
+   * On success only `source` and `workflow` are replaced, exactly like
+   * /api/ingest-media: segments/transcript/timeline/title survive, and the
+   * workflow is reset so the rights confirmation and export authorization
+   * are re-established for this newly-acquired source rather than inherited
+   * from the previous one.
+   */
+  const download: JobHandler = async ({ job, reportProgress }) => {
+    const project = loadProjectOrThrow(projectRepo, job.projectId);
+    const payload = job.payload as { url?: unknown };
+    const url =
+      typeof payload.url === "string" && payload.url.trim().length > 0
+        ? payload.url.trim()
+        : project.source.youtubeUrl;
+
+    if (!url) {
+      throw new Error(
+        "Aucune URL YouTube à télécharger : fournissez payload.url ou associez d'abord une source YouTube au projet."
+      );
+    }
+
+    reportProgress(1);
+    const result = await downloadYoutubeVideo(
+      { url, onProgress: (percent) => reportProgress(Math.min(99, Math.round(percent))) },
+      resolveVideoDownloader(),
+      { probeDurationSec: async (storedPath) => (await verifyExport(storedPath)).durationSec }
+    );
+
+    if (job.projectId) {
+      projectRepo.updateProject(job.projectId, {
+        ...project,
+        source: result.source,
+        workflow: result.workflow,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    reportProgress(100);
+    return {
+      source: result.source,
+      workflow: result.workflow,
+      videoId: result.videoId,
+      normalizedUrl: result.normalizedUrl,
+      sizeBytes: result.sizeBytes,
+    };
+  };
+
+  return { download, transcription, analysis, tracking, render };
 }

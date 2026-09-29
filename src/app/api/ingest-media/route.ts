@@ -12,9 +12,9 @@ import type { Project } from "@/lib/domain/types";
 /**
  * Local media ingestion endpoint. Accepts a multipart/form-data upload with
  * a single `file` field. Validates filename/type/size, stores the bytes
- * locally, and best-effort probes the real duration with ffprobe. This
- * route never downloads anything from YouTube or any other remote source —
- * it only accepts bytes the client already has.
+ * locally, and best-effort probes the real duration with ffprobe. It only
+ * ever accepts bytes the client already has; fetching a remote source is
+ * the separate /api/download-youtube + "download" job path.
  *
  * When the form data also includes a `projectId` field, the import is
  * associated with that persisted project: the caller must be authenticated

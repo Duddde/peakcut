@@ -7,9 +7,9 @@ import { parseIngestResponse } from "@/lib/ingestion/parseIngestResponse";
 /**
  * Lets a user pick a local media file, preview it in the browser (HTML5
  * <video>/<audio>, no upload involved yet), and then explicitly import it
- * via a real multipart POST to /api/ingest-media. PeakCut never downloads
- * anything from YouTube or any other remote source — only bytes the user
- * already has on this machine ever get sent here.
+ * via a real multipart POST to /api/ingest-media. Only bytes the user
+ * already has on this machine ever get sent here; fetching a YouTube
+ * source is the separate YoutubeSourcePanel path.
  */
 
 const ACCEPTED_TYPES =
@@ -118,9 +118,9 @@ export function SourceIngestPanel({
       <div>
         <h3 className="text-sm font-semibold text-zinc-100">Média local</h3>
         <p className="mt-1 text-xs text-zinc-500">
-          Sélectionnez un fichier vidéo ou audio sur cette machine. Aucun téléchargement distant
-          n&apos;est jamais déclenché — PeakCut ne va jamais chercher un fichier sur YouTube ou
-          ailleurs à votre place.
+          Sélectionnez un fichier vidéo ou audio sur cette machine. Rien n&apos;est téléchargé
+          depuis Internet par ce panneau — pour une source YouTube, utilisez le panneau « Source
+          YouTube » ci-dessous.
         </p>
       </div>
 

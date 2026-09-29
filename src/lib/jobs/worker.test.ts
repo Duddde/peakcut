@@ -39,6 +39,7 @@ function noopHandlers(overrides: Partial<JobHandlers> = {}): JobHandlers {
     throw new Error("not implemented for this test");
   };
   return {
+    download: alwaysThrow,
     transcription: alwaysThrow,
     analysis: alwaysThrow,
     tracking: alwaysThrow,

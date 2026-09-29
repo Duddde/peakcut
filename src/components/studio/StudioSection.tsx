@@ -19,6 +19,7 @@ import { TranscriptEditor } from "@/components/editor/TranscriptEditor";
 import { VariantPicker } from "@/components/editor/VariantPicker";
 import { AccountGate } from "@/components/AccountGate";
 import { SourceIngestPanel } from "./SourceIngestPanel";
+import { YoutubeSourcePanel } from "./YoutubeSourcePanel";
 
 /** Mirrors PREVIEW_MAX_DURATION_SEC in src/lib/ffmpeg/renderPreviewSegment.ts — kept as a plain constant here since that module pulls in node:child_process and must never be imported into client code. */
 const PREVIEW_MAX_DURATION_SEC = 20;
@@ -203,6 +204,16 @@ export function StudioSection({
     setWorkflow(result.workflow);
     setAnalyzeStatus("idle");
     setAnalyzeMessage(null);
+  }
+
+  /**
+   * A download job has already written the new source onto the project
+   * server-side, and the job result deliberately redacts the server path,
+   * so the freshly-persisted project is re-read from the server rather
+   * than reconstructed here from a partial payload.
+   */
+  function handleDownloaded() {
+    window.location.reload();
   }
 
   async function handleAnalyze() {
@@ -519,8 +530,10 @@ export function StudioSection({
           )}
         </div>
         <SourceIngestPanel onIngested={handleIngested} projectId={projectId} />
+        <YoutubeSourcePanel projectId={projectId} onDownloaded={handleDownloaded} />
         <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">
-          Importez un média pour générer les premiers segments éditables.
+          Importez un média ou téléchargez une vidéo YouTube pour générer les premiers segments
+          éditables.
         </div>
       </div>
     );
@@ -572,6 +585,8 @@ export function StudioSection({
 
       <SourceIngestPanel onIngested={handleIngested} projectId={projectId} />
 
+      <YoutubeSourcePanel projectId={projectId} onDownloaded={handleDownloaded} />
+
       <div
         data-testid="current-source-card"
         className="space-y-2 rounded-2xl border border-white/10 bg-zinc-900/60 p-5"
@@ -582,7 +597,11 @@ export function StudioSection({
           <dd className="text-zinc-200">{source.title}</dd>
           <dt className="text-zinc-600">Type</dt>
           <dd className="text-zinc-200">
-            {source.type === "local-upload" ? "Fichier local" : "URL YouTube (non téléchargée)"}
+            {source.type === "local-upload"
+              ? "Fichier local"
+              : source.localFilePath
+                ? "Vidéo YouTube téléchargée"
+                : "URL YouTube (pas encore téléchargée)"}
           </dd>
           <dt className="text-zinc-600">Durée détectée</dt>
           <dd className="text-zinc-200">{source.durationSec.toFixed(1)}s</dd>
@@ -593,8 +612,8 @@ export function StudioSection({
         </dl>
         <p className="text-[11px] text-zinc-500">
           {source.localFilePath
-            ? "Média local prêt côté serveur pour un export réel."
-            : "Aperçu uniquement pour le moment : aucun média local réel n'est encore associé à cette source."}
+            ? "Fichier média prêt côté serveur pour un export réel."
+            : "Aperçu uniquement pour le moment : aucun fichier média n'est encore associé à cette source."}
         </p>
       </div>
 

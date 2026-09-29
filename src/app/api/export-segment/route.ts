@@ -12,8 +12,9 @@ import { getAuthenticatedUserFromRequestAsync } from "@/lib/auth/getAuthenticate
 
 /**
  * Real export endpoint: cuts a vertical (1080x1920) H.264/AAC clip with
- * burned-in word-by-word subtitles from a *locally ingested* media file via
- * the real ffmpeg binary, then verifies the result with real ffprobe.
+ * burned-in word-by-word subtitles from the project's media file — a
+ * local import or a downloaded YouTube source — via the real ffmpeg
+ * binary, then verifies the result with real ffprobe.
  *
  * This is the *final, full-quality* download — unlike the free, anonymous
  * /api/preview-segment (low-res, watermarked, no account needed), this

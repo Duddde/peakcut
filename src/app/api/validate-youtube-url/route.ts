@@ -3,9 +3,10 @@ import { validateYoutubeUrl } from "@/lib/youtube/validateYoutubeUrl";
 
 /**
  * Strictly validates that a submitted URL is a well-formed public YouTube
- * video link. This endpoint performs NO download of the video, NO call to
- * any YouTube API, and NO publishing action of any kind — it only checks
- * the shape of the URL string itself.
+ * video link, and nothing more: this endpoint performs no download, no
+ * call to any YouTube API, and no publishing action. Fetching the video
+ * is a separate, authenticated, per-project action — see
+ * /api/download-youtube.
  */
 export async function POST(request: NextRequest) {
   let body: unknown;

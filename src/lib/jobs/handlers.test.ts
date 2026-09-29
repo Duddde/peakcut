@@ -16,6 +16,7 @@ import { createDefaultJobHandlers } from "./handlers";
 import { SqliteJobRepository } from "./JobRepository";
 import { TranscriptProviderNotConfiguredError } from "@/lib/transcript/TranscriptProvider";
 import type { TranscriptProvider } from "@/lib/transcript/TranscriptProvider";
+import { VideoDownloadError, type VideoDownloader, type VideoDownloadResult } from "@/lib/youtube/videoDownloader";
 import type { Project, Segment } from "@/lib/domain/types";
 import type { FrameTracker, FrameTrack } from "@/lib/tracking/types";
 
@@ -97,6 +98,27 @@ class UnconfiguredProvider implements TranscriptProvider {
   }
 }
 
+function makeFakeDownloader(
+  overrides: Partial<VideoDownloadResult> = {}
+): VideoDownloader & { urls: string[] } {
+  const urls: string[] = [];
+  return {
+    urls,
+    async download(request) {
+      urls.push(request.url);
+      request.onProgress?.(50);
+      return {
+        storedPath: "/data/downloads/abc/dQw4w9WgXcQ.mp4",
+        sizeBytes: 1024,
+        title: "Une conference",
+        durationSec: 720,
+        videoId: "dQw4w9WgXcQ",
+        ...overrides,
+      };
+    },
+  };
+}
+
 function makeFakeTracker(track: FrameTrack): FrameTracker {
   return {
     id: "fake-tracker",
@@ -106,6 +128,166 @@ function makeFakeTracker(track: FrameTrack): FrameTracker {
 }
 
 describe("createDefaultJobHandlers", () => {
+  it("download fetches the project's YouTube source and persists it as the new local file", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject();
+      projects.createProject(owner.id, project);
+      const videoDownloader = makeFakeDownloader();
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, videoDownloader });
+
+      jobs.createJob({
+        id: "job-1",
+        projectId: project.id,
+        kind: "download",
+        payload: { url: "https://youtu.be/dQw4w9WgXcQ" },
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      const claimed = jobs.claimNextJob()!;
+      const progress: number[] = [];
+
+      const result = (await handlers.download({
+        job: claimed,
+        reportProgress: (p) => progress.push(p),
+      })) as { videoId: string; normalizedUrl: string };
+
+      expect(result.videoId).toBe("dQw4w9WgXcQ");
+      expect(videoDownloader.urls).toEqual(["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]);
+      expect(progress.at(-1)).toBe(100);
+
+      const persisted = projects.getProjectById(project.id);
+      expect(persisted?.source.type).toBe("youtube");
+      expect(persisted?.source.youtubeUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+      expect(persisted?.source.localFilePath).toBe("/data/downloads/abc/dQw4w9WgXcQ.mp4");
+      expect(persisted?.source.durationSec).toBe(720);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("download falls back to the URL already registered on the project", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({
+        source: {
+          id: "s0",
+          type: "youtube",
+          youtubeUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          title: "Source enregistree",
+          durationSec: 0,
+          originTimestamp: "2026-01-01T00:00:00.000Z",
+          confidence: 0.5,
+        },
+      });
+      projects.createProject(owner.id, project);
+      const videoDownloader = makeFakeDownloader();
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, videoDownloader });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "download", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+      await handlers.download({ job: jobs.claimNextJob()!, reportProgress: () => {} });
+
+      expect(videoDownloader.urls).toEqual(["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("download resets the workflow so a fetched source grants no export right", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({
+        workflow: authorizeExport(confirmRights(createInitialWorkflow(), "alice@example.com")),
+      });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, videoDownloader: makeFakeDownloader() });
+
+      jobs.createJob({
+        id: "job-1",
+        projectId: project.id,
+        kind: "download",
+        payload: { url: "https://youtu.be/dQw4w9WgXcQ" },
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      await handlers.download({ job: jobs.claimNextJob()!, reportProgress: () => {} });
+
+      const persisted = projects.getProjectById(project.id);
+      expect(persisted?.workflow.phase).toBe("analysis_preview");
+      expect(persisted?.workflow.rights.confirmed).toBe(false);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("download keeps the project's existing segments", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({ segments: [makeSegment("seg-1", 0, 5)] });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, videoDownloader: makeFakeDownloader() });
+
+      jobs.createJob({
+        id: "job-1",
+        projectId: project.id,
+        kind: "download",
+        payload: { url: "https://youtu.be/dQw4w9WgXcQ" },
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      await handlers.download({ job: jobs.claimNextJob()!, reportProgress: () => {} });
+
+      expect(projects.getProjectById(project.id)?.segments).toHaveLength(1);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("download fails when there is no URL to fetch at all", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject();
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, videoDownloader: makeFakeDownloader() });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "download", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+      await expect(
+        handlers.download({ job: jobs.claimNextJob()!, reportProgress: () => {} })
+      ).rejects.toThrow(/Aucune URL YouTube/);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("download leaves the project untouched when the fetch fails", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject();
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({
+        db,
+        exportsBaseDir,
+        videoDownloader: {
+          download: async () => {
+            throw new VideoDownloadError("video-unavailable", "Video privee.");
+          },
+        },
+      });
+
+      jobs.createJob({
+        id: "job-1",
+        projectId: project.id,
+        kind: "download",
+        payload: { url: "https://youtu.be/dQw4w9WgXcQ" },
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      await expect(
+        handlers.download({ job: jobs.claimNextJob()!, reportProgress: () => {} })
+      ).rejects.toBeInstanceOf(VideoDownloadError);
+
+      expect(projects.getProjectById(project.id)?.source.type).toBe("local-upload");
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
   it("transcription persists the transcript onto the project when projectId is set", async () => {
     const { db, projects, jobs, owner, exportsBaseDir } = await setup();
     try {

@@ -5,7 +5,7 @@ import { buildDemoProject } from "@/lib/demo/buildDemoProject";
 const STEPS = [
   {
     title: "1. Coller un lien public",
-    body: "Collez l'URL d'une vidéo YouTube publique ou importez un fichier local. L'URL est validée de façon strictement structurelle : aucun téléchargement, aucun appel à une API externe.",
+    body: "Collez l'URL d'une vidéo YouTube publique ou importez un fichier local. Le lien est d'abord validé (domaine, identifiant de vidéo unique), puis la vidéo est téléchargée dans un nouveau projet — sur votre demande explicite, jamais automatiquement.",
   },
   {
     title: "2. Transcription mot-à-mot",
@@ -21,7 +21,7 @@ const STEPS = [
   },
   {
     title: "5. Export vertical réel",
-    body: "L'export utilise FFmpeg réel sur votre média local : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot brûlés, avec vérification ffprobe du fichier produit.",
+    body: "L'export utilise FFmpeg réel sur le média du projet — fichier importé ou vidéo YouTube téléchargée : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot brûlés, avec vérification ffprobe du fichier produit.",
   },
   {
     title: "6. Validation humaine",
@@ -59,7 +59,7 @@ const FEATURES = [
 const FAQ = [
   {
     q: "PeakCut télécharge-t-il la vidéo YouTube que je colle ?",
-    a: "Non. L'endpoint de validation ne fait que vérifier la forme de l'URL (domaine, identifiant de vidéo). Aucun téléchargement, aucun appel à l'API YouTube, aucune donnée envoyée à un tiers.",
+    a: "Oui, mais uniquement quand vous le demandez : le bouton valide le lien puis lance le téléchargement de cette seule vidéo (jamais une playlist ni une chaîne) dans un projet qui vous appartient. Rien n'est téléchargé en arrière-plan, et aucune donnée n'est envoyée à un tiers.",
   },
   {
     q: "Le score prédit-il le nombre de vues ou le temps de visionnage ?",
@@ -134,9 +134,10 @@ export default async function Home() {
         <section className="border-t border-white/5 bg-white/[0.02] px-6 py-6">
           <div className="mx-auto max-w-3xl text-center text-xs text-zinc-500">
             <strong className="text-zinc-300">Avertissement droits d&apos;auteur :</strong> vous êtes
-            seul·e responsable de disposer des droits nécessaires sur la vidéo source. PeakCut ne
-            vérifie pas la titularité des droits et n&apos;autorise aucun usage. Mode validation
-            humaine activé par défaut : aucun export n&apos;est publié automatiquement.
+            seul·e responsable de disposer des droits nécessaires sur la vidéo source, y compris
+            pour la télécharger. PeakCut ne vérifie pas la titularité des droits et n&apos;autorise
+            aucun usage. Mode validation humaine activé par défaut : aucun export n&apos;est publié
+            automatiquement.
           </div>
         </section>
 
@@ -179,13 +180,14 @@ export default async function Home() {
           <div className="mx-auto max-w-6xl">
             <div className="mb-10 text-center">
               <h2 className="text-2xl font-bold text-zinc-50 sm:text-3xl">
-                Studio — importez un média local ou explorez la démo
+                Studio — importez un média, téléchargez une source YouTube ou explorez la démo
               </h2>
               <p className="mx-auto mt-3 max-w-2xl text-sm text-zinc-400">
                 Importez un fichier local (aperçu HTML5 immédiat, aucun envoi tant que vous ne
-                cliquez pas sur « Importer ») ou lancez l&apos;analyse déterministe hors-ligne pour
-                remplacer les segments de démonstration. Modifiez le texte, les bornes ou le
-                cadrage : le score se recalcule en direct, localement.
+                cliquez pas sur « Importer »), téléchargez la source YouTube d&apos;un projet, ou
+                lancez l&apos;analyse déterministe hors-ligne pour remplacer les segments de
+                démonstration. Modifiez le texte, les bornes ou le cadrage : le score se recalcule
+                en direct, localement.
               </p>
             </div>
             <StudioSection initialProject={demoProject} />

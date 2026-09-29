@@ -1,6 +1,6 @@
-export type JobKind = "transcription" | "analysis" | "tracking" | "render";
+export type JobKind = "download" | "transcription" | "analysis" | "tracking" | "render";
 
-export const JOB_KINDS: JobKind[] = ["transcription", "analysis", "tracking", "render"];
+export const JOB_KINDS: JobKind[] = ["download", "transcription", "analysis", "tracking", "render"];
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 

@@ -4,12 +4,17 @@ import type { WorkflowState } from "@/lib/domain/types";
  * Consolidates every reason a segment export might be blocked, so the
  * export UI and the export API route show/enforce the exact same rules.
  * This is pure and side-effect free — it never touches the filesystem or
- * network; callers supply the facts (hasLocalMediaFile, durations) already
+ * network; callers supply the facts (hasMediaFile, durations) already
  * known to them.
+ *
+ * Note that having the bytes on disk is necessary but never sufficient:
+ * a downloaded YouTube source passes `hasMediaFile` like any local
+ * import, and still cannot be exported until a human has confirmed the
+ * rights and explicitly authorized the export.
  */
 export interface ExportGateParams {
   workflow: WorkflowState;
-  /** True only when the source is a real, locally-provided file (never a YouTube URL, which PeakCut never downloads). */
+  /** True when a real media file exists on disk for this source — a local import, or a YouTube video PeakCut has downloaded. */
   hasLocalMediaFile: boolean;
   segmentEndSec: number;
   sourceDurationSec: number;
@@ -26,11 +31,11 @@ export function getExportBlockReasons(params: ExportGateParams): string[] {
   }
   if (!params.hasLocalMediaFile) {
     reasons.push(
-      "Aucun média local importé : PeakCut ne télécharge jamais automatiquement une source distante (YouTube)."
+      "Aucun fichier média disponible : importez un média local ou téléchargez la source YouTube du projet."
     );
   }
   if (params.hasLocalMediaFile && params.segmentEndSec > params.sourceDurationSec) {
-    reasons.push("Ce segment dépasse la durée du média local importé.");
+    reasons.push("Ce segment dépasse la durée du média disponible.");
   }
 
   return reasons;

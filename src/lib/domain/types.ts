@@ -12,9 +12,14 @@ export type SourceType = "youtube" | "local-upload";
 export interface Source {
   id: string;
   type: SourceType;
-  /** Present only when type === "youtube". Never downloaded automatically. */
+  /** Present only when type === "youtube". Only ever fetched on an explicit, per-project user action. */
   youtubeUrl?: string;
-  /** Present only when type === "local-upload". Path is local to the machine running PeakCut. */
+  /**
+   * Path, local to the machine running PeakCut, of the media file backing
+   * this source: the uploaded file for a "local-upload", or the downloaded
+   * video for a "youtube" source. Absent while a YouTube URL has been
+   * registered but not yet downloaded.
+   */
   localFilePath?: string;
   title: string;
   durationSec: number;
@@ -23,9 +28,9 @@ export interface Source {
   /**
    * Confidence, in [0, 1], in the *metadata* describing this source — not a
    * content-quality or virality signal. 1.0 for a locally-provided file
-   * (the user supplied the bytes directly); lower for a YouTube URL, whose
-   * actual availability/visibility PeakCut cannot verify without contacting
-   * YouTube (which it deliberately does not do here).
+   * (the user supplied the bytes directly); slightly lower for a downloaded
+   * YouTube video, whose title comes from YouTube rather than the user, and
+   * lower still for a URL that has only been registered, never fetched.
    */
   confidence: number;
 }

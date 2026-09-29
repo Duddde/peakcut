@@ -10,6 +10,7 @@ export interface JobHandlerContext {
 export type JobHandler = (ctx: JobHandlerContext) => Promise<unknown>;
 
 export interface JobHandlers {
+  download: JobHandler;
   transcription: JobHandler;
   analysis: JobHandler;
   tracking: JobHandler;

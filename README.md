@@ -6,16 +6,20 @@ PeakCut est un MVP de repurposing vidéo orienté Shorts. Il transforme un proje
 
 - Landing page française responsive, inspirée des workflows de clipping modernes, avec identité PeakCut originale.
 - Validation structurelle stricte des URLs YouTube publiques (`watch`, `youtu.be`, `shorts`, `embed`) sans appel réseau.
+- Téléchargement réel de la vidéo validée (yt-dlp), en job de fond, sur demande explicite dans un projet : le fichier obtenu alimente ensuite transcription, analyse, cadrage et export.
 - Transcript mot-à-mot horodaté et locuteur, via un fournisseur mock déterministe hors-ligne.
 - Adaptateurs préparés pour OpenAI `gpt-4o-transcribe-diarize` et AssemblyAI ; ils échouent explicitement sans configuration et n’appellent aucun service par défaut.
 - Score éditorial explicable : accroche, densité lexicale, question, émotion, changement de locuteur, durée, confiance et pénalités.
 - Éditeur de démonstration : segments, timeline, texte et mots éditables, cadrage et safe zones pour les variantes 9:16, 1:1, 4:5 et 16:9.
-- Export FFmpeg réel depuis un média local : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot et vérification ffprobe.
+- Export FFmpeg réel depuis le fichier média du projet (import local ou vidéo YouTube téléchargée) : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot et vérification ffprobe.
 - Validation humaine par défaut ; aucune publication YouTube/TikTok n’est implémentée dans ce MVP.
 
 ## Installation
 
 Pré-requis : Node.js 20+, npm et FFmpeg/FFprobe pour les tests d’intégration d’export.
+Pour les jobs `download`, il faut aussi [yt-dlp](https://github.com/yt-dlp/yt-dlp) sur le `PATH`
+(ou `PEAKCUT_YTDLP_PATH`). Sans lui, ces jobs échouent explicitement avec
+`downloader-unavailable` — rien n’est simulé.
 
 ```bash
 npm install
@@ -69,13 +73,33 @@ src/
   app/                         # page, styles et route API YouTube
   components/                  # formulaire URL et éditeur de démonstration
   lib/domain/                  # types de projet et d’édition
-  lib/youtube/                 # validation structurelle d’URL
+  lib/youtube/                 # validation d’URL et téléchargement vidéo (yt-dlp)
   lib/transcript/              # interface et adaptateurs de transcription
   lib/scoring/                 # score déterministe et explications
   lib/ffmpeg/                  # ASS, export et vérification ffprobe
   lib/demo/                    # projet de démonstration
  test/                         # fixtures synthétiques et setup Vitest
 ```
+
+## Téléchargement d’une source YouTube
+
+Le téléchargement n’est jamais automatique : il est demandé explicitement, par un
+utilisateur authentifié, pour un projet qu’il possède. La route valide l’URL puis met
+un job `download` en file ; le worker (`npm run worker`) le traite hors du cycle HTTP.
+
+```bash
+curl -X POST http://localhost:3000/api/download-youtube \
+  -H 'content-type: application/json' \
+  -b 'peakcut_session=<cookie de session>' \
+  -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","projectId":"<id>"}'
+```
+
+Garde-fous : une seule vidéo à la fois (`--no-playlist`), refus des directs, limites de
+durée et de taille vérifiées **avant** de télécharger le moindre octet
+(`PEAKCUT_DOWNLOAD_MAX_DURATION_SEC`, `PEAKCUT_DOWNLOAD_MAX_MB`), quota par utilisateur,
+et nettoyage complet du répertoire en cas d’échec. Obtenir le fichier n’autorise rien :
+l’export reste bloqué tant que les droits ne sont pas confirmés par un humain et que
+l’export n’est pas explicitement autorisé.
 
 ## API de validation
 
@@ -85,7 +109,9 @@ curl -X POST http://localhost:3000/api/validate-youtube-url \
   -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
 ```
 
-La réponse contient `videoId` et `normalizedUrl` pour une URL valide. Cette route ne télécharge pas la vidéo et n’interroge pas YouTube.
+La réponse contient `videoId` et `normalizedUrl` pour une URL valide. Cette route se limite à la
+forme de l’URL : elle ne télécharge rien et n’interroge pas YouTube. Le téléchargement passe
+par `/api/download-youtube` ci-dessus.
 
 ## Limites et prochaines étapes
 
