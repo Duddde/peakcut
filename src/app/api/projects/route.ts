@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
-import { getAuthenticatedUserFromRequestAsync } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import {
+  getAuthenticatedUserFromRequestAsync,
+  getRequestActorAsync,
+  PUBLIC_TRIAL_ACCESS,
+} from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import { countProjectsOwnedBy } from "@/lib/publicTrial/quotas";
+import { PUBLIC_TRIAL_LIMITS } from "@/lib/publicTrial/config";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { createInitialWorkflow } from "@/lib/workflow/workflow";
 import type { Project } from "@/lib/domain/types";
@@ -32,6 +38,11 @@ export function createProjectsListHandler(injectedDeps?: AppDeps) {
  * as "preview only" everywhere), analysis_preview workflow phase, no
  * segments. Real content is added afterward via ingestion/analysis and a
  * PATCH to this project.
+ *
+ * Also open to a public-trial actor (PEAKCUT_PUBLIC_TRIAL=1), capped at
+ * PUBLIC_TRIAL_LIMITS.maxProjectsPerTrial ephemeral projects (one per
+ * tested video) — they are owned by the trial's own user row, so they are
+ * invisible to every account and are deleted with the trial. Listing (GET) stays account-only.
  */
 export function createProjectsCreateHandler(injectedDeps?: AppDeps) {
   return async function POST(request: NextRequest) {
@@ -39,9 +50,19 @@ export function createProjectsCreateHandler(injectedDeps?: AppDeps) {
     if (depsOrError instanceof NextResponse) return depsOrError;
     const deps = depsOrError;
 
-    const user = await getAuthenticatedUserFromRequestAsync(request, deps);
-    if (!user) {
+    const actor = await getRequestActorAsync(request, deps, PUBLIC_TRIAL_ACCESS);
+    if (!actor) {
       return NextResponse.json({ ok: false, error: "Non authentifié." }, { status: 401 });
+    }
+    const user = actor.user;
+    if (actor.kind === "trial" && countProjectsOwnedBy(deps.db, user.id) >= PUBLIC_TRIAL_LIMITS.maxProjectsPerTrial) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `Limite de l'essai public atteinte : ${PUBLIC_TRIAL_LIMITS.maxProjectsPerTrial} projets d'essai maximum.`,
+        },
+        { status: 429 }
+      );
     }
 
     let body: Record<string, unknown> = {};

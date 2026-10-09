@@ -8,6 +8,10 @@ import { SqliteJobRepository } from "../src/lib/jobs/JobRepository";
 import { createDefaultJobHandlers } from "../src/lib/jobs/handlers";
 import { runJobWorker } from "../src/lib/jobs/worker";
 import { JOB_KINDS, type JobKind } from "../src/lib/jobs/types";
+import { cleanupExpiredTrials, resolveTrialStorageRoots } from "../src/lib/publicTrial/cleanup";
+
+/** How often a long-running worker sweeps expired public-trial projects (and their files). */
+const TRIAL_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Standalone job-worker process — entirely separate from the Next.js HTTP
@@ -84,6 +88,22 @@ async function main() {
   const downloadsBaseDir = process.env.PEAKCUT_DOWNLOADS_DIR ?? path.join(process.cwd(), ".data", "downloads");
   const handlers = createDefaultJobHandlers({ db, exportsBaseDir, downloadsBaseDir });
 
+  // Expired public trials are swept here as well as on each new trial
+  // start, so their files go away even when nobody starts a new trial.
+  // Runs whatever PEAKCUT_PUBLIC_TRIAL says: turning the flag off must not
+  // strand data that was created while it was on.
+  const trialRoots = { ...resolveTrialStorageRoots(), exportsBaseDir, downloadsBaseDir };
+  const sweepTrials = async () => {
+    try {
+      const removed = await cleanupExpiredTrials(db, { roots: trialRoots });
+      if (removed > 0) process.stdout.write(`[peakcut-worker] ${removed} essai(s) public(s) expiré(s) supprimé(s).\n`);
+    } catch (err) {
+      process.stderr.write(`[peakcut-worker] Nettoyage des essais impossible : ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  };
+  await sweepTrials();
+  const sweepTimer = options.once ? null : setInterval(() => void sweepTrials(), TRIAL_CLEANUP_INTERVAL_MS);
+
   const controller = new AbortController();
   const shutdown = (signal: string) => {
     process.stderr.write(`\n[peakcut-worker] Signal ${signal} reçu, arrêt après le job en cours…\n`);
@@ -101,6 +121,7 @@ async function main() {
     signal: controller.signal,
   });
 
+  if (sweepTimer) clearInterval(sweepTimer);
   process.stdout.write(`[peakcut-worker] Terminé : ${result.processed} job(s) traité(s) en ${result.iterations} itération(s).\n`);
 }
 

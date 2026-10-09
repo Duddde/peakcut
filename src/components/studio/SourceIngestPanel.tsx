@@ -32,16 +32,13 @@ function formatBytes(bytes: number): string {
 export function SourceIngestPanel({
   onIngested,
   projectId,
+  requiresAccount = false,
+  onAccountRequired,
 }: {
   onIngested: (result: { source: Source; workflow: WorkflowState }) => void;
-  /**
-   * When provided (i.e. the studio is mounted on a persisted project, not
-   * the public demo), the import is associated with this project and its
-   * `source` is persisted immediately server-side — see /api/ingest-media.
-   * Omitted entirely on the public landing-page demo, which stays
-   * anonymous and unauthenticated exactly as before.
-   */
   projectId?: string;
+  requiresAccount?: boolean;
+  onAccountRequired?: () => void;
 }) {
   const inputId = useId();
   const [file, setFile] = useState<File | null>(null);
@@ -80,6 +77,10 @@ export function SourceIngestPanel({
   }
 
   async function handleImport() {
+    if (requiresAccount) {
+      onAccountRequired?.();
+      return;
+    }
     if (!file) return;
     setStatus("uploading");
     setStatusMessage("Import en cours…");
@@ -145,7 +146,7 @@ export function SourceIngestPanel({
           disabled={!file || status === "uploading"}
           className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {status === "uploading" ? "Import…" : "Importer"}
+          {requiresAccount ? "Se connecter pour importer" : "Importer"}
         </button>
       </div>
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { StudioSection } from "./StudioSection";
 import type { Project } from "@/lib/domain/types";
+import { describePublicTrialLimits } from "@/lib/publicTrial/config";
 
 function makeProject(): Project {
   const now = "2026-01-01T00:00:00.000Z";
@@ -364,5 +365,86 @@ describe("StudioSection", () => {
       )
     );
     expect(screen.getAllByText(/segment démo initial/i).length).toBeGreaterThan(0);
+  });
+
+  it("keeps the public demo readable but gates analysis behind the account dialog", async () => {
+    render(<StudioSection initialProject={makeProject()} publicDemo />);
+    fireEvent.click(screen.getByRole("button", { name: /lancer l'analyse/i }));
+
+    expect(await screen.findByRole("dialog", { name: /compte est nécessaire/i })).toBeInTheDocument();
+    expect(screen.queryByText(/segment analysé prioritaire/i)).not.toBeInTheDocument();
+  });
+
+  it("gates public demo customization and leaves the displayed values unchanged", async () => {
+    render(<StudioSection initialProject={makeProject()} publicDemo />);
+    const title = screen.getByDisplayValue("Démo");
+
+    expect(title).toHaveAttribute("readonly");
+    fireEvent.click(title);
+
+    expect(await screen.findByRole("dialog", { name: /compte est nécessaire/i })).toBeInTheDocument();
+    expect(title).toHaveValue("Démo");
+  });
+
+  describe("public trial project", () => {
+    const TRIAL = {
+      expiresAt: "2026-01-01T02:00:00.000Z",
+      limits: describePublicTrialLimits(),
+    };
+
+    function trialProject(): Project {
+      const project = makeProject();
+      return { ...project, source: { ...project.source, type: "youtube", localFilePath: "/srv/d/x/v.mp4" } };
+    }
+
+    function stubFetch(handler: (url: string, init?: RequestInit) => unknown) {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        const body = handler(url, init) ?? { ok: true, providers: [] };
+        return { ok: true, status: 200, json: async () => body } as Response;
+      });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      return fetchMock;
+    }
+
+    it("shows the trial limits, hides local import and never opens the account gate", () => {
+      stubFetch(() => undefined);
+      render(<StudioSection initialProject={trialProject()} projectId="p1" onSave={vi.fn()} publicTrial={TRIAL} />);
+
+      expect(screen.getByRole("region", { name: /limites de l'essai public/i })).toHaveTextContent(/aucun téléchargement final sans compte/i);
+      expect(screen.getByText(/import de fichiers locaux est réservé aux comptes/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /lancer le rendu de test/i })).toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: /compte est nécessaire/i })).not.toBeInTheDocument();
+    });
+
+    it("persists the rights confirmation and export authorization before any test render", async () => {
+      stubFetch(() => undefined);
+      const onSave = vi.fn(async () => ({ ok: true }));
+      render(<StudioSection initialProject={trialProject()} projectId="p1" onSave={onSave} publicTrial={TRIAL} />);
+
+      const confirm = screen.getByRole("button", { name: /confirmer les droits/i });
+      expect(confirm).toBeDisabled();
+      fireEvent.click(screen.getByRole("checkbox", { name: /je confirme détenir les droits sur cette source/i }));
+      fireEvent.click(confirm);
+
+      expect(await screen.findByText(/rendu de test autorisé/i)).toBeInTheDocument();
+      const saved = (onSave.mock.calls[0] as unknown as [Project])[0];
+      expect(saved.workflow).toMatchObject({ phase: "export_authorized", rights: { confirmed: true } });
+      expect(saved.workflow.publicationPolicy).toBe("publication_never_implicit");
+    });
+
+    it("asks the server for a project-scoped preview, never sending a file path", async () => {
+      const fetchMock = stubFetch((url) =>
+        url === "/api/preview-segment"
+          ? { ok: true, url: "/api/preview-segment/abc", expiresAt: "2026-01-01T00:15:00.000Z" }
+          : undefined
+      );
+      render(<StudioSection initialProject={trialProject()} projectId="p1" onSave={vi.fn()} publicTrial={TRIAL} />);
+
+      fireEvent.click(within(screen.getByTestId("trial-preview-panel")).getByRole("button", { name: /générer l'aperçu/i }));
+
+      expect(await screen.findByTestId("trial-preview-video")).toHaveAttribute("src", "/api/preview-segment/abc");
+      const call = fetchMock.mock.calls.find(([url]) => url === "/api/preview-segment")!;
+      expect(JSON.parse(call[1]!.body as string)).toEqual({ projectId: "p1", segmentId: "demo-segment-1" });
+    });
   });
 });

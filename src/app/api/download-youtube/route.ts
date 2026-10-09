@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
-import { getAuthenticatedUserFromRequestAsync } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import { getRequestActorAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import {
+  checkTrialJobQuota,
+  getSharedPublicTrialRateLimiters,
+  tooManyRequests,
+  type PublicTrialRateLimiters,
+} from "@/lib/publicTrial/quotas";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { SqliteJobRepository } from "@/lib/jobs/JobRepository";
 import { redactJobForResponse } from "@/lib/jobs/redactJob";
@@ -25,11 +31,20 @@ import { validateYoutubeUrl } from "@/lib/youtube/validateYoutubeUrl";
  * endpoint can never be used as an open, anonymous fetch-anything proxy.
  * Acquiring the file grants no export right: the rights confirmation and
  * export authorization gates are untouched (see lib/workflow/exportGate).
+ *
+ * With PEAKCUT_PUBLIC_TRIAL=1, an anonymous trial actor may also queue a
+ * download — on its own ephemeral project only, with `rightsConfirmed: true`
+ * in the body, under the trial's request rate and per-trial download cap;
+ * the worker then applies the trial duration/size/time limits (see
+ * jobs/handlers). A video YouTube refuses to serve (bot check, sign-in,
+ * DRM, members-only…) fails the job with that reason — nothing here or in
+ * the worker tries to get around it.
  */
 
 export interface DownloadYoutubeRouteOptions {
   deps?: AppDeps;
   rateLimiter?: RateLimiter;
+  trialRateLimiters?: PublicTrialRateLimiters;
 }
 
 export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOptions = {}) {
@@ -41,10 +56,11 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
     if (depsOrError instanceof NextResponse) return depsOrError;
     const deps = depsOrError;
 
-    const user = await getAuthenticatedUserFromRequestAsync(request, deps);
-    if (!user) {
+    const actor = await getRequestActorAsync(request, deps, PUBLIC_TRIAL_ACCESS);
+    if (!actor) {
       return NextResponse.json({ ok: false, error: "Non authentifié." }, { status: 401 });
     }
+    const user = actor.user;
 
     const limited = rateLimiter.consume(`download-youtube:${user.id}`);
     if (!limited.allowed) {
@@ -68,10 +84,11 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
     if (typeof body !== "object" || body === null) {
       return NextResponse.json({ ok: false, error: "Le corps de la requête doit être un objet." }, { status: 400 });
     }
-    const { url, projectId, idempotencyKey } = body as {
+    const { url, projectId, idempotencyKey, rightsConfirmed } = body as {
       url?: unknown;
       projectId?: unknown;
       idempotencyKey?: unknown;
+      rightsConfirmed?: unknown;
     };
 
     if (typeof url !== "string") {
@@ -101,6 +118,33 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
       return NextResponse.json({ ok: false, error: "Projet introuvable." }, { status: 404 });
     }
 
+    const normalizedKey = typeof idempotencyKey === "string" ? idempotencyKey : null;
+    if (actor.kind === "trial") {
+      // No account stands behind a trial download, so the visitor's own
+      // rights confirmation for this video is required on every request.
+      if (rightsConfirmed !== true) {
+        return NextResponse.json(
+          { ok: false, error: "Confirmez détenir les droits sur cette vidéo avant de la télécharger." },
+          { status: 403 }
+        );
+      }
+      const limiter = (options.trialRateLimiters ?? getSharedPublicTrialRateLimiters()).jobRequests;
+      const limited = limiter.consume(`trial-jobs:${user.id}`);
+      if (!limited.allowed) {
+        return tooManyRequests("Trop de traitements demandés pendant l'essai. Réessayez dans une minute.", limited.retryAfterMs);
+      }
+      // Synchronous check immediately followed by createJob — see checkTrialJobQuota.
+      const quotaError = checkTrialJobQuota(deps.db, {
+        ownerId: user.id,
+        projectId: projectId.trim(),
+        kind: "download",
+        idempotencyKey: normalizedKey,
+      });
+      if (quotaError) {
+        return NextResponse.json({ ok: false, error: quotaError }, { status: 429 });
+      }
+    }
+
     const jobRepo = new SqliteJobRepository(deps.db);
     const { job, created } = jobRepo.createJob({
       id: randomUUID(),
@@ -110,7 +154,7 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
       // tracking/playlist parameter riding along on the submitted link is
       // dropped here rather than handed to yt-dlp.
       payload: { url: validation.normalizedUrl, videoId: validation.videoId },
-      idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey : null,
+      idempotencyKey: normalizedKey,
       now: new Date().toISOString(),
     });
 

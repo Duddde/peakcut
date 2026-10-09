@@ -6,11 +6,14 @@ export function VariantPicker({
   selectedVariantId,
   onSelect,
   onChangeCrop,
+  readOnly = false,
 }: {
   variants: Variant[];
   selectedVariantId: string;
   onSelect: (id: string) => void;
   onChangeCrop: (id: string, patch: Partial<Variant["crop"]>) => void;
+  /** Public demo: crop values stay visible but cannot be edited. */
+  readOnly?: boolean;
 }) {
   const selected = variants.find((v) => v.id === selectedVariantId) ?? variants[0];
   return (
@@ -48,6 +51,7 @@ export function VariantPicker({
               min={0}
               max={1}
               step={0.01}
+              readOnly={readOnly}
               value={selected.crop[field]}
               onChange={(e) => onChangeCrop(selected.id, { [field]: Number(e.target.value) })}
               className="rounded border border-white/10 bg-zinc-900 px-2 py-1 text-zinc-200"

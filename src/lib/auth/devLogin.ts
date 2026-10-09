@@ -7,15 +7,15 @@
  * as before. All this flag does is stop hiding them behind curl, so Google
  * OAuth isn't a prerequisite for exercising the app locally.
  *
- * Two conditions, both required, so it can never be on by accident:
- *  - PEAKCUT_DEV_LOGIN must be explicitly set to "1"
- *  - NODE_ENV must not be "production"
+ * Two conditions are required in production:
+ *  - PEAKCUT_PASSWORD_LOGIN must be explicitly set to "1"
+ *  - the existing development flag remains available for non-production tests
  *
- * The second condition is deliberately not overridable. Setting the env var
- * on a production build does nothing — a forgotten variable in a deploy
- * config must not be able to put a password form on a public login page.
+ * Password login uses the same server-side routes and signed httpOnly session
+ * cookie as the rest of the application; this flag only controls visibility
+ * of the form.
  */
 export function isDevLoginEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.NODE_ENV === "production") return false;
+  if (env.NODE_ENV === "production") return env.PEAKCUT_PASSWORD_LOGIN === "1";
   return env.PEAKCUT_DEV_LOGIN === "1";
 }

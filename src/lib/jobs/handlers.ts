@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, rmdir } from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
 import type { Project, Segment } from "@/lib/domain/types";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
@@ -20,9 +20,13 @@ import type { FrameTracker } from "@/lib/tracking/types";
 import { downloadYoutubeVideo } from "@/lib/youtube/downloadYoutubeVideo";
 import {
   createYtDlpDownloader,
+  DEFAULT_DOWNLOAD_LIMITS,
   readDownloaderEnvConfig,
   type VideoDownloader,
+  type VideoDownloadLimits,
 } from "@/lib/youtube/videoDownloader";
+import { PUBLIC_TRIAL_LIMITS, type PublicTrialLimits } from "@/lib/publicTrial/config";
+import { getProjectTrialStatus } from "@/lib/publicTrial/TrialActorRepository";
 import type { JobHandler, JobHandlers } from "./worker";
 
 type TrackProviderId = "local-subject" | "stable-center-fallback";
@@ -46,6 +50,35 @@ export interface DefaultJobHandlersDeps {
   trackerFactory?: TrackerFactory;
   /** Injected in tests; defaults to the real yt-dlp-backed downloader. */
   videoDownloader?: VideoDownloader;
+  /** Injected in tests; defaults to a yt-dlp downloader with the trial's limits and no cookies. */
+  trialVideoDownloader?: VideoDownloader;
+  trialLimits?: PublicTrialLimits;
+  now?: () => number;
+}
+
+/**
+ * Download limits for a public-trial project: the stricter of the
+ * deployment's own limits and the trial's — a trial can never download
+ * more than an account would on the same server.
+ */
+export function trialDownloadLimits(
+  base: Partial<VideoDownloadLimits>,
+  trial: PublicTrialLimits = PUBLIC_TRIAL_LIMITS
+): VideoDownloadLimits {
+  const merged = { ...DEFAULT_DOWNLOAD_LIMITS, ...base };
+  return {
+    ...merged,
+    maxDurationSec: Math.min(merged.maxDurationSec, trial.maxDurationSec),
+    maxBytes: Math.min(merged.maxBytes, trial.maxBytes),
+    downloadTimeoutMs: Math.min(merged.downloadTimeoutMs, trial.downloadTimeoutMs),
+  };
+}
+
+export class TrialExpiredError extends Error {
+  constructor() {
+    super("L'essai public associé à ce projet a expiré : le traitement n'est plus exécuté.");
+    this.name = "TrialExpiredError";
+  }
 }
 
 function loadProjectOrThrow(repo: SqliteProjectRepository, projectId: string | null): Project {
@@ -112,6 +145,8 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
   const projectRepo = new SqliteProjectRepository(deps.db);
 
   let cachedDownloader: VideoDownloader | null = deps.videoDownloader ?? null;
+  let cachedTrialDownloader: VideoDownloader | null = deps.trialVideoDownloader ?? null;
+  const nowMs = deps.now ?? (() => Date.now());
 
   /** Built lazily so a worker that never runs a download job never reads the downloader's env config. */
   function resolveVideoDownloader(): VideoDownloader {
@@ -124,6 +159,36 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       limits: env.limits,
     });
     return cachedDownloader;
+  }
+
+  function resolveTrialVideoDownloader(): VideoDownloader {
+    if (cachedTrialDownloader) return cachedTrialDownloader;
+    const env = readDownloaderEnvConfig();
+    cachedTrialDownloader = createYtDlpDownloader({
+      baseDir: deps.downloadsBaseDir ?? env.baseDir,
+      binaryPath: env.binaryPath,
+      // Never the operator's YouTube cookies: an anonymous visitor must not
+      // reach, through the server's sign-in, a video YouTube would refuse them.
+      cookiesPath: null,
+      limits: trialDownloadLimits(env.limits, deps.trialLimits),
+    });
+    return cachedTrialDownloader;
+  }
+
+  /**
+   * Trial status is read from the DB, not from PEAKCUT_PUBLIC_TRIAL: the
+   * worker may run with a different environment than the web server, and a
+   * trial project must keep its limits (and its expiry) regardless.
+   */
+  function trialStatusOf(projectId: string | null) {
+    return projectId ? getProjectTrialStatus(deps.db, projectId, nowMs()) : "none";
+  }
+
+  function refuseExpiredTrial(handler: JobHandler): JobHandler {
+    return async (ctx) => {
+      if (trialStatusOf(ctx.job.projectId) === "expired") throw new TrialExpiredError();
+      return handler(ctx);
+    };
   }
 
   const transcription: JobHandler = async ({ job }) => {
@@ -319,20 +384,34 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       );
     }
 
+    const isTrial = trialStatusOf(job.projectId) !== "none";
+
     reportProgress(1);
     const result = await downloadYoutubeVideo(
       { url, onProgress: (percent) => reportProgress(Math.min(99, Math.round(percent))) },
-      resolveVideoDownloader(),
+      isTrial ? resolveTrialVideoDownloader() : resolveVideoDownloader(),
       { probeDurationSec: async (storedPath) => (await verifyExport(storedPath)).durationSec }
     );
 
     if (job.projectId) {
-      projectRepo.updateProject(job.projectId, {
-        ...project,
-        source: result.source,
-        workflow: result.workflow,
-        updatedAt: new Date().toISOString(),
-      });
+      try {
+        if (isTrial && trialStatusOf(job.projectId) !== "active") throw new TrialExpiredError();
+        projectRepo.updateProject(job.projectId, {
+          ...project,
+          source: result.source,
+          workflow: result.workflow,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        // The trial expired (or its project was deleted) mid-download: the
+        // file has no owner any more, so it must not outlive this job.
+        if (isTrial && result.source.localFilePath) {
+          await rm(result.source.localFilePath, { force: true }).catch(() => undefined);
+          // Non-recursive: only drops the per-download directory once it is empty.
+          await rmdir(path.dirname(result.source.localFilePath)).catch(() => undefined);
+        }
+        throw err;
+      }
     }
 
     reportProgress(100);
@@ -345,5 +424,11 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     };
   };
 
-  return { download, transcription, analysis, tracking, render };
+  return {
+    download: refuseExpiredTrial(download),
+    transcription: refuseExpiredTrial(transcription),
+    analysis: refuseExpiredTrial(analysis),
+    tracking: refuseExpiredTrial(tracking),
+    render: refuseExpiredTrial(render),
+  };
 }

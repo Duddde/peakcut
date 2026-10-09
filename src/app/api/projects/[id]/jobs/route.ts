@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
-import { getAuthenticatedUserFromRequestAsync } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import { getAuthenticatedUserFromRequestAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { SqliteJobRepository } from "@/lib/jobs/JobRepository";
 import { redactJobForResponse } from "@/lib/jobs/redactJob";
@@ -16,7 +16,7 @@ export function createProjectJobsListHandler(injectedDeps?: AppDeps) {
     if (depsOrError instanceof NextResponse) return depsOrError;
     const deps = depsOrError;
 
-    const user = await getAuthenticatedUserFromRequestAsync(request, deps);
+    const user = await getAuthenticatedUserFromRequestAsync(request, deps, PUBLIC_TRIAL_ACCESS);
     if (!user) {
       return NextResponse.json({ ok: false, error: "Non authentifié." }, { status: 401 });
     }

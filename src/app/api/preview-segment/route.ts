@@ -5,6 +5,15 @@ import { mkdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { createFixedWindowRateLimiter, type RateLimiter } from "@/lib/ratelimit/fixedWindowRateLimiter";
+import type { AppDeps } from "@/lib/appDeps";
+import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
+import { getRequestActorAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
+import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
+import {
+  getSharedPublicTrialRateLimiters,
+  tooManyRequests,
+  type PublicTrialRateLimiters,
+} from "@/lib/publicTrial/quotas";
 
 const execFileAsync = promisify(execFile);
 const MAX_DURATION_SEC = 15;
@@ -15,6 +24,10 @@ export interface PreviewHandlerOptions {
   previewsBaseDir: string;
   rateLimiter?: RateLimiter;
   enabled?: boolean;
+  /** Where the worker writes downloaded YouTube sources; a project preview may read from it too. */
+  downloadsBaseDir?: string;
+  appDeps?: AppDeps;
+  trialRateLimiters?: PublicTrialRateLimiters;
 }
 
 function clientKey(request: NextRequest): string {
@@ -39,6 +52,58 @@ async function probeDuration(sourcePath: string): Promise<number> {
   return duration;
 }
 
+/**
+ * Resolves a project-scoped preview request (`{ projectId, segmentId }`):
+ * the caller — an account, or a public-trial actor when
+ * PEAKCUT_PUBLIC_TRIAL=1 — must own the project (404 otherwise, like every
+ * project route). The preview window is the segment's start plus at most
+ * MAX_DURATION_SEC. A trial is additionally capped per window.
+ */
+async function resolveProjectPreview(
+  request: NextRequest,
+  body: Record<string, unknown>,
+  options: PreviewHandlerOptions
+): Promise<{ sourcePath: string; startSec: number; endSec: number } | NextResponse> {
+  const depsOrError = resolveRouteDeps(options.appDeps);
+  if (depsOrError instanceof NextResponse) return depsOrError;
+  const deps = depsOrError;
+
+  const actor = await getRequestActorAsync(request, deps, PUBLIC_TRIAL_ACCESS);
+  if (!actor) return NextResponse.json({ ok: false, error: "Non authentifié." }, { status: 401 });
+
+  const projectId = body.projectId as string;
+  const repo = new SqliteProjectRepository(deps.db);
+  const ownerId = repo.getProjectOwnerId(projectId);
+  const project = ownerId !== null && ownerId === actor.user.id ? repo.getProjectById(projectId) : null;
+  if (!project) return NextResponse.json({ ok: false, error: "Projet introuvable." }, { status: 404 });
+
+  const segment = project.segments.find((s) => s.id === body.segmentId);
+  if (!segment) return NextResponse.json({ ok: false, error: "Segment introuvable." }, { status: 404 });
+
+  const localPath = project.source.localFilePath;
+  const sourcePath =
+    safePath(localPath, options.uploadsBaseDir) ??
+    (options.downloadsBaseDir ? safePath(localPath, options.downloadsBaseDir) : null);
+  if (!sourcePath) {
+    return NextResponse.json({ ok: false, error: "Aucun média disponible pour ce projet." }, { status: 422 });
+  }
+
+  if (actor.kind === "trial") {
+    const limited = (options.trialRateLimiters ?? getSharedPublicTrialRateLimiters()).previews.consume(
+      `trial-previews:${actor.user.id}`
+    );
+    if (!limited.allowed) {
+      return tooManyRequests("Limite d'aperçus de l'essai public atteinte. Réessayez plus tard.", limited.retryAfterMs);
+    }
+  }
+
+  return {
+    sourcePath,
+    startSec: segment.startSec,
+    endSec: Math.min(segment.endSec, segment.startSec + MAX_DURATION_SEC),
+  };
+}
+
 export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
   const rateLimiter = options.rateLimiter ?? createFixedWindowRateLimiter({ maxRequests: 10, windowMs: 60_000 });
   return async function POST(request: NextRequest) {
@@ -58,10 +123,21 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
     } catch {
       return NextResponse.json({ ok: false, error: "Corps JSON invalide." }, { status: 400 });
     }
-    const sourcePath = safePath(body.sourcePath, options.uploadsBaseDir);
-    if (!sourcePath) return NextResponse.json({ ok: false, error: "Source hors du répertoire uploads." }, { status: 403 });
-    const startSec = numberValue(body.startSec);
-    const endSec = numberValue(body.endSec);
+    let sourcePath: string | null;
+    let startSec: number | null;
+    let endSec: number | null;
+    if (typeof body.projectId === "string") {
+      // Project mode: the source and bounds come from the caller's own
+      // project in the DB, never from the request body.
+      const resolved = await resolveProjectPreview(request, body, options);
+      if (resolved instanceof NextResponse) return resolved;
+      ({ sourcePath, startSec, endSec } = resolved);
+    } else {
+      sourcePath = safePath(body.sourcePath, options.uploadsBaseDir);
+      if (!sourcePath) return NextResponse.json({ ok: false, error: "Source hors du répertoire uploads." }, { status: 403 });
+      startSec = numberValue(body.startSec);
+      endSec = numberValue(body.endSec);
+    }
     if (startSec === null || endSec === null || startSec < 0 || endSec <= startSec) {
       return NextResponse.json({ ok: false, error: "Bornes d'aperçu invalides." }, { status: 400 });
     }
@@ -93,6 +169,7 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
 const defaultHandler = createPreviewSegmentHandler({
   uploadsBaseDir: process.env.PEAKCUT_UPLOADS_DIR ?? path.join(process.cwd(), ".data", "uploads"),
   previewsBaseDir: process.env.PEAKCUT_PREVIEW_DIR ?? path.join(process.cwd(), ".data", "previews"),
+  downloadsBaseDir: process.env.PEAKCUT_DOWNLOADS_DIR ?? path.join(process.cwd(), ".data", "downloads"),
 });
 
 export const POST = defaultHandler;

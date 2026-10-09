@@ -152,10 +152,27 @@ CREATE INDEX idx_jobs_status ON jobs(status);
 CREATE INDEX idx_jobs_project_id ON jobs(project_id);
 `;
 
+/**
+ * Public trial (PEAKCUT_PUBLIC_TRIAL=1): each anonymous trial is backed by
+ * a regular `users` row with no password and no google_id — so the usual
+ * owner_id ownership checks isolate it from every private project for
+ * free — plus this marker row carrying its expiry. Deleting the user
+ * cascades to its projects, and from there to sources/segments/jobs.
+ */
+const ADD_PUBLIC_TRIAL_SQL = `
+CREATE TABLE trial_actors (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX idx_trial_actors_expires_at ON trial_actors(expires_at);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "init_schema", sql: INIT_SCHEMA_SQL },
   { version: 2, name: "add_google_auth", sql: ADD_GOOGLE_AUTH_SQL },
   { version: 3, name: "add_jobs", sql: ADD_JOBS_SQL },
+  { version: 4, name: "add_public_trial", sql: ADD_PUBLIC_TRIAL_SQL },
 ];
 
 /**

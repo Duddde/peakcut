@@ -18,8 +18,15 @@ import { Timeline } from "@/components/editor/Timeline";
 import { TranscriptEditor } from "@/components/editor/TranscriptEditor";
 import { VariantPicker } from "@/components/editor/VariantPicker";
 import { AccountGate } from "@/components/AccountGate";
+import { PublicTrialNotice } from "@/components/PublicTrialNotice";
+import type { PublicTrialInfo } from "@/lib/publicTrial/client";
+import { authorizeExport, confirmRights } from "@/lib/workflow/workflow";
+import { PUBLIC_DEMO_CALLBACK_URL, relativeUrlOf } from "@/lib/auth/safeCallbackUrl";
 import { SourceIngestPanel } from "./SourceIngestPanel";
 import { YoutubeSourcePanel } from "./YoutubeSourcePanel";
+
+/** Server-side cap of a project preview window (see MAX_DURATION_SEC in /api/preview-segment). */
+const PROJECT_PREVIEW_MAX_DURATION_SEC = 15;
 
 /** Mirrors PREVIEW_MAX_DURATION_SEC in src/lib/ffmpeg/renderPreviewSegment.ts — kept as a plain constant here since that module pulls in node:child_process and must never be imported into client code. */
 const PREVIEW_MAX_DURATION_SEC = 20;
@@ -83,6 +90,8 @@ export function StudioSection({
   initialProject,
   onSave,
   projectId,
+  publicDemo = false,
+  publicTrial,
 }: {
   initialProject: Project;
   /**
@@ -93,9 +102,19 @@ export function StudioSection({
    * so nothing is lost.
    */
   onSave?: (project: Project) => Promise<SaveResult>;
-  /** Forwarded to SourceIngestPanel so an import is associated with and persisted to this project. Omitted on the public demo. */
+  /** Forwarded to SourceIngestPanel so an import is associated with and persisted to this project. */
   projectId?: string;
+  /** Public landing-page demonstration: visible without an account, but read-only. */
+  publicDemo?: boolean;
+  /**
+   * Set when this project belongs to an anonymous public-trial actor (the
+   * server said so). Trial operations run for real, within the trial's
+   * limits, and never open AccountGate.
+   */
+  publicTrial?: PublicTrialInfo;
 }) {
+  const isPublicDemo = publicDemo;
+  const isPublicTrial = Boolean(publicTrial) && !publicDemo;
   const [title, setTitle] = useState(initialProject.title);
   const [source, setSource] = useState<Source>(initialProject.source);
   const [workflow, setWorkflow] = useState<WorkflowState>(initialProject.workflow);
@@ -136,6 +155,40 @@ export function StudioSection({
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const [showAccountGate, setShowAccountGate] = useState(false);
 
+  const [trialNotice, setTrialNotice] = useState<string | null>(null);
+  const [trialRightsChecked, setTrialRightsChecked] = useState(false);
+  const [rightsStatus, setRightsStatus] = useState<AnalyzeStatus>("idle");
+  const [rightsMessage, setRightsMessage] = useState<string | null>(null);
+
+  function requireAccountForCustomization() {
+    if (isPublicTrial) {
+      // A trial request only comes back unauthenticated once the trial has
+      // expired: say so instead of offering an account dialog.
+      setTrialNotice("L'essai public a expiré : ce projet et ses fichiers sont supprimés. Revenez à l'accueil pour recommencer.");
+      return;
+    }
+    setShowAccountGate(true);
+  }
+
+  /** Public trial: rights confirmation + export authorization, persisted right away so the worker sees it. */
+  async function handleConfirmTrialRights() {
+    if (!isPublicTrial || !onSave || !trialRightsChecked) return;
+    const nextWorkflow = authorizeExport(confirmRights(workflow, "Visiteur de l'essai public (sans compte)"));
+    setRightsStatus("loading");
+    setRightsMessage("Enregistrement de la confirmation…");
+    const result = await onSave({ ...initialProject, title, source, workflow: nextWorkflow, segments, updatedAt: new Date().toISOString() });
+    if (result.ok) {
+      setWorkflow(nextWorkflow);
+      setRightsStatus("success");
+      setRightsMessage("Droits confirmés : le rendu de test est autorisé.");
+    } else {
+      setRightsStatus("error");
+      setRightsMessage(result.error ?? "La confirmation n'a pas pu être enregistrée.");
+    }
+  }
+
+
+
   useEffect(() => {
     let cancelled = false;
     fetch("/api/transcript-providers")
@@ -168,6 +221,10 @@ export function StudioSection({
   }, [title, source, workflow, segments]);
 
   async function handleSaveProject() {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     if (!onSave) return;
     setSaveStatus("loading");
     setSaveMessage("Enregistrement en cours…");
@@ -195,7 +252,43 @@ export function StudioSection({
     [segments, selectedSegmentId]
   );
 
+  /** Project preview (trial): source and bounds are resolved server-side from the owned project. */
+  async function handleProjectPreview() {
+    if (!projectId || !selectedSegment) return;
+    setPreviewStatus("loading");
+    setPreviewMessage("Génération de l'aperçu (filigrane, résolution réduite)…");
+    setPreviewUrl(null);
+    try {
+      const res = await fetch("/api/preview-segment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, segmentId: selectedSegment.id }),
+      });
+      if (res.status === 401) {
+        setPreviewStatus("idle");
+        setPreviewMessage(null);
+        requireAccountForCustomization();
+        return;
+      }
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        setPreviewStatus("error");
+        setPreviewMessage(json?.error ?? "Aperçu indisponible.");
+        return;
+      }
+      setPreviewUrl(json.url);
+      setPreviewStatus("success");
+      setPreviewMessage(`Aperçu avec filigrane prêt (expire à ${new Date(json.expiresAt).toLocaleTimeString("fr-FR")}).`);
+    } catch {
+      setPreviewStatus("error");
+      setPreviewMessage("Impossible de contacter le serveur d'aperçu.");
+    }
+  }
   function updateSegment(id: string, updater: (segment: Segment) => Segment) {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     setSegments((prev) => prev.map((s) => (s.id === id ? rescoreSegment(updater(s)) : s)));
   }
 
@@ -217,6 +310,10 @@ export function StudioSection({
   }
 
   async function handleAnalyze() {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     setAnalyzeStatus("loading");
     setAnalyzeMessage("Analyse en cours…");
     try {
@@ -259,6 +356,10 @@ export function StudioSection({
   }
 
   async function handleTranscribe() {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     if (!source.localFilePath) return;
     const providerLabel =
       providerOptions.find((p) => p.id === selectedProviderId)?.displayName ?? selectedProviderId;
@@ -310,6 +411,10 @@ export function StudioSection({
   }
 
   async function handleTrack() {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     if (!source.localFilePath) return;
     setTrackStatus("loading");
     setTrackResult(null);
@@ -363,6 +468,10 @@ export function StudioSection({
   }
 
   async function handleRender() {
+    if (isPublicDemo) {
+      requireAccountForCustomization();
+      return;
+    }
     if (!projectId || !selectedSegment) return;
     if (!workflow.rights.confirmed || workflow.phase !== "export_authorized") {
       setRenderStatus("error");
@@ -507,6 +616,17 @@ export function StudioSection({
     }
   }
 
+  const trialBanner = isPublicTrial && publicTrial ? (
+    <div className="space-y-2">
+      <PublicTrialNotice limits={publicTrial.limits} expiresAt={publicTrial.expiresAt} />
+      {trialNotice && (
+        <p role="alert" className="rounded-lg border border-rose-400/30 bg-rose-400/10 px-4 py-2 text-xs text-rose-300">
+          {trialNotice}
+        </p>
+      )}
+    </div>
+  ) : null;
+
   if (!selectedSegment) {
     return (
       <div className="space-y-6">
@@ -514,8 +634,16 @@ export function StudioSection({
           <input
             aria-label="Titre du projet"
             type="text"
+            readOnly={isPublicDemo}
+            onClick={isPublicDemo ? requireAccountForCustomization : undefined}
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => {
+              if (isPublicDemo) {
+                requireAccountForCustomization();
+                return;
+              }
+              setTitle(e.target.value);
+            }}
             className="w-full max-w-xl rounded-lg border border-white/10 bg-transparent px-3 py-2 text-lg font-semibold text-zinc-100 outline-none focus:border-amber-400/60"
           />
           {onSave && (
@@ -529,8 +657,25 @@ export function StudioSection({
             </div>
           )}
         </div>
-        <SourceIngestPanel onIngested={handleIngested} projectId={projectId} />
-        <YoutubeSourcePanel projectId={projectId} onDownloaded={handleDownloaded} />
+        {trialBanner}
+        {isPublicTrial ? (
+          <p className="rounded-xl border border-white/10 px-4 py-3 text-xs text-zinc-500">
+            L&apos;import de fichiers locaux est réservé aux comptes ; l&apos;essai public fonctionne à partir d&apos;un lien YouTube.
+          </p>
+        ) : (
+          <SourceIngestPanel
+            onIngested={handleIngested}
+            projectId={projectId}
+            requiresAccount={isPublicDemo}
+            onAccountRequired={requireAccountForCustomization}
+          />
+        )}
+        <YoutubeSourcePanel
+          projectId={projectId}
+          onDownloaded={handleDownloaded}
+          requiresAccount={isPublicDemo}
+          onAccountRequired={requireAccountForCustomization}
+        />
         <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">
           Importez un média ou téléchargez une vidéo YouTube pour générer les premiers segments
           éditables.
@@ -551,8 +696,16 @@ export function StudioSection({
           <input
             id="studio-project-title"
             type="text"
+            readOnly={isPublicDemo}
+            onClick={isPublicDemo ? requireAccountForCustomization : undefined}
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => {
+              if (isPublicDemo) {
+                requireAccountForCustomization();
+                return;
+              }
+              setTitle(e.target.value);
+            }}
             className="w-full rounded-lg border border-white/10 bg-transparent px-3 py-2 text-lg font-semibold text-zinc-100 outline-none focus:border-amber-400/60"
           />
           <p className="mt-1 text-[11px] text-zinc-500">
@@ -583,9 +736,26 @@ export function StudioSection({
         )}
       </div>
 
-      <SourceIngestPanel onIngested={handleIngested} projectId={projectId} />
+      {trialBanner}
+      {isPublicTrial ? (
+        <p className="rounded-xl border border-white/10 px-4 py-3 text-xs text-zinc-500">
+          L&apos;import de fichiers locaux est réservé aux comptes ; l&apos;essai public fonctionne à partir d&apos;un lien YouTube.
+        </p>
+      ) : (
+        <SourceIngestPanel
+          onIngested={handleIngested}
+          projectId={projectId}
+          requiresAccount={isPublicDemo}
+          onAccountRequired={requireAccountForCustomization}
+        />
+      )}
 
-      <YoutubeSourcePanel projectId={projectId} onDownloaded={handleDownloaded} />
+      <YoutubeSourcePanel
+        projectId={projectId}
+        onDownloaded={handleDownloaded}
+        requiresAccount={isPublicDemo}
+        onAccountRequired={requireAccountForCustomization}
+      />
 
       <div
         data-testid="current-source-card"
@@ -663,13 +833,13 @@ export function StudioSection({
           <button
             type="button"
             onClick={handleTranscribe}
-            disabled={!source.localFilePath || transcribeStatus === "loading"}
+            disabled={(!source.localFilePath && !isPublicDemo) || transcribeStatus === "loading"}
             className="rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {transcribeStatus === "loading" ? "Transcription…" : "Transcrire ce média"}
           </button>
         </div>
-        {!source.localFilePath && (
+        {!source.localFilePath && !isPublicDemo && (
           <p className="text-[11px] text-zinc-500">
             Importez un média local ci-dessus pour activer la transcription réelle. Les segments de
             démonstration restent inchangés tant qu&apos;aucun média n&apos;a été importé.
@@ -713,13 +883,13 @@ export function StudioSection({
           <button
             type="button"
             onClick={handleTrack}
-            disabled={!source.localFilePath || trackStatus === "loading"}
+            disabled={(!source.localFilePath && !isPublicDemo) || trackStatus === "loading"}
             className="rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {trackStatus === "loading" ? "Détection…" : "Détecter le cadrage"}
           </button>
         </div>
-        {!source.localFilePath && (
+        {!source.localFilePath && !isPublicDemo && (
           <p className="text-[11px] text-zinc-500">
             Importez un fichier local ci-dessus pour activer la détection de cadrage.
           </p>
@@ -762,6 +932,7 @@ export function StudioSection({
             <input
               id="studio-segment-title"
               type="text"
+              readOnly={isPublicDemo}
               value={selectedSegment.title}
               onChange={(e) =>
                 updateSegment(selectedSegment.id, (s) => ({ ...s, title: e.target.value }))
@@ -774,6 +945,7 @@ export function StudioSection({
                 <input
                   type="number"
                   step={0.1}
+                  readOnly={isPublicDemo}
                   value={selectedSegment.startSec}
                   onChange={(e) =>
                     updateSegment(selectedSegment.id, (s) => ({
@@ -789,6 +961,7 @@ export function StudioSection({
                 <input
                   type="number"
                   step={0.1}
+                  readOnly={isPublicDemo}
                   value={selectedSegment.endSec}
                   onChange={(e) =>
                     updateSegment(selectedSegment.id, (s) => ({
@@ -808,6 +981,7 @@ export function StudioSection({
         <div className="space-y-6 rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
           <TranscriptEditor
             words={selectedSegment.words}
+            readOnly={isPublicDemo}
             onChangeWord={(index, patch) =>
               updateSegment(selectedSegment.id, (s) => ({
                 ...s,
@@ -818,9 +992,14 @@ export function StudioSection({
           <VariantPicker
             variants={selectedSegment.variants}
             selectedVariantId={selectedVariantId}
-            onSelect={(id) =>
-              setSelectedVariantBySegment((prev) => ({ ...prev, [selectedSegment.id]: id }))
-            }
+            readOnly={isPublicDemo}
+            onSelect={(id) => {
+              if (isPublicDemo) {
+                requireAccountForCustomization();
+                return;
+              }
+              setSelectedVariantBySegment((prev) => ({ ...prev, [selectedSegment.id]: id }));
+            }}
             onChangeCrop={(variantId, patch) =>
               updateSegment(selectedSegment.id, (s) => ({
                 ...s,
@@ -834,6 +1013,13 @@ export function StudioSection({
       </div>
 
       <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-xs text-amber-200">
+        {isPublicDemo && (
+          <p className="mb-2 font-semibold">
+            Démonstration publique en lecture seule : connectez-vous pour importer un média,
+            modifier le texte, le timing ou le cadrage, lancer les traitements et conserver vos
+            changements.
+          </p>
+        )}
         Mode validation humaine actif : aucun export ni aucune publication n&apos;est déclenché
         automatiquement. Les droits sur la source doivent être confirmés par un humain avant tout
         export.
@@ -841,17 +1027,85 @@ export function StudioSection({
       <div className="rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">Export MP4</h3>
-            <p className="mt-1 text-xs text-zinc-500">Le rendu est exécuté par le worker et vérifié par FFprobe.</p>
+            <h3 className="text-sm font-semibold text-zinc-100">{isPublicTrial ? "Rendu de test (essai public)" : "Export MP4"}</h3>
+            <p className="mt-1 text-xs text-zinc-500">
+              {isPublicTrial
+                ? `Rendu exécuté par le worker et vérifié par FFprobe, ${publicTrial?.limits.maxRenders ?? 0} maximum. Il reste sur le serveur et est supprimé à l'expiration de l'essai : aucun téléchargement final sans compte.`
+                : "Le rendu est exécuté par le worker et vérifié par FFprobe."}
+            </p>
           </div>
-          <button type="button" onClick={handleRender} disabled={!projectId || renderStatus === "loading"} className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50">
-            {renderStatus === "loading" ? "Rendu…" : "Lancer le rendu"}
+          <button type="button" onClick={handleRender} disabled={(!projectId && !isPublicDemo) || renderStatus === "loading"} className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50">
+            {renderStatus === "loading" ? "Rendu…" : isPublicTrial ? "Lancer le rendu de test" : "Lancer le rendu"}
           </button>
         </div>
+        {isPublicTrial && (
+          <div className="mt-3 space-y-2 rounded-lg border border-white/10 p-3 text-xs text-zinc-300">
+            {workflow.rights.confirmed && workflow.phase === "export_authorized" ? (
+              <p className="text-emerald-300">Droits confirmés pour cette source : rendu de test autorisé.</p>
+            ) : (
+              <>
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={trialRightsChecked}
+                    onChange={(e) => setTrialRightsChecked(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Je confirme détenir les droits sur cette source, ou être autorisé à l&apos;utiliser, et j&apos;autorise
+                    ce rendu de test. Rien n&apos;est publié.
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  onClick={handleConfirmTrialRights}
+                  disabled={!trialRightsChecked || rightsStatus === "loading"}
+                  className="rounded-lg border border-amber-400/50 px-3 py-1.5 font-semibold text-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Confirmer les droits
+                </button>
+              </>
+            )}
+            {rightsMessage && (
+              <p role="status" className={rightsStatus === "error" ? "text-rose-300" : "text-zinc-400"}>
+                {rightsMessage}
+              </p>
+            )}
+          </div>
+        )}
         <p role="status" aria-live="polite" className={`mt-3 text-xs ${renderStatus === "error" ? "text-rose-300" : renderStatus === "success" ? "text-emerald-300" : "text-zinc-500"}`}>
-          {renderMessage ?? "Validation humaine obligatoire avant export."}
+          {renderMessage ??
+            (isPublicDemo
+              ? "Connexion requise pour lancer un rendu réel. Validation humaine obligatoire avant export."
+              : "Validation humaine obligatoire avant export.")}
         </p>
       </div>
+
+      {isPublicTrial && projectId && source.localFilePath && (
+        <div data-testid="trial-preview-panel" className="space-y-3 rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">Aperçu de l&apos;essai</h3>
+            <p className="mt-1 text-xs text-zinc-500">
+              Basse résolution avec filigrane PeakCut, {PROJECT_PREVIEW_MAX_DURATION_SEC}s maximum depuis le début du
+              segment sélectionné, nombre d&apos;aperçus limité pendant l&apos;essai.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleProjectPreview}
+            disabled={previewStatus === "loading"}
+            className="rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {previewStatus === "loading" ? "Génération…" : "Générer l'aperçu"}
+          </button>
+          {previewUrl && (
+            <video data-testid="trial-preview-video" src={previewUrl} controls className="max-h-64 w-full rounded-lg bg-black" />
+          )}
+          <p role="status" aria-live="polite" className={`text-xs ${previewStatus === "error" ? "text-rose-300" : "text-zinc-500"}`}>
+            {previewMessage}
+          </p>
+        </div>
+      )}
 
       {!projectId && source.localFilePath && (
         <div data-testid="preview-panel" className="space-y-3 rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
@@ -916,9 +1170,15 @@ export function StudioSection({
         </div>
       )}
 
-      {showAccountGate && (
+      {showAccountGate && !isPublicTrial && (
         <AccountGate
-          callbackUrl={typeof window !== "undefined" ? window.location.href : "/"}
+          callbackUrl={
+            isPublicDemo
+              ? PUBLIC_DEMO_CALLBACK_URL
+              : typeof window !== "undefined"
+                ? relativeUrlOf(window.location)
+                : "/"
+          }
           onClose={() => setShowAccountGate(false)}
         />
       )}

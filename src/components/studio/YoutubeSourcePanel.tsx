@@ -30,15 +30,13 @@ function shownByJobProgress(job: ParsedJob | null, message: string | null): bool
 export function YoutubeSourcePanel({
   projectId,
   onDownloaded,
+  requiresAccount = false,
+  onAccountRequired,
 }: {
-  /**
-   * The persisted project the downloaded video becomes the source of.
-   * Omitted on the anonymous public demo, where the panel explains that a
-   * project is needed rather than offering a download nobody owns.
-   */
   projectId?: string;
-  /** Called once the download job has succeeded, so the caller can reload the project. */
   onDownloaded?: (job: ParsedJob) => void;
+  requiresAccount?: boolean;
+  onAccountRequired?: () => void;
 }) {
   const inputId = useId();
   const [url, setUrl] = useState("");
@@ -53,6 +51,10 @@ export function YoutubeSourcePanel({
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (requiresAccount) {
+      onAccountRequired?.();
+      return;
+    }
     if (!projectId || status === "working") return;
 
     setStatus("working");
@@ -141,10 +143,10 @@ export function YoutubeSourcePanel({
         />
         <button
           type="submit"
-          disabled={!projectId || status === "working" || url.trim().length === 0}
+          disabled={(!projectId && !requiresAccount) || status === "working" || url.trim().length === 0}
           className="shrink-0 rounded-xl bg-amber-400 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {status === "working" ? "Téléchargement…" : "Valider et télécharger"}
+          {status === "working" ? "Téléchargement…" : requiresAccount ? "Se connecter pour télécharger" : "Valider et télécharger"}
         </button>
       </form>
 

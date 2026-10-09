@@ -5,6 +5,12 @@ import { parseJobResponse, type ParsedJob } from "@/lib/jobs/parseJobResponse";
 import { pollJobUntilDone } from "@/lib/jobs/jobClient";
 import { JobProgress } from "@/components/studio/JobProgress";
 import { AccountGate } from "@/components/AccountGate";
+import { PublicTrialNotice } from "@/components/PublicTrialNotice";
+import {
+  fetchPublicTrialStatus,
+  formatTrialDuration,
+  type PublicTrialLimitsSummary,
+} from "@/lib/publicTrial/client";
 
 /**
  * The landing page's single entry point: one button validates the pasted
@@ -20,6 +26,18 @@ import { AccountGate } from "@/components/AccountGate";
  * belongs to an account and to one of that account's projects — an
  * anonymous visitor gets the existing AccountGate instead, and the server
  * enforces this independently on /api/download-youtube.
+ *
+ * When the server runs the public trial (PEAKCUT_PUBLIC_TRIAL=1), a
+ * signed-out visitor is instead offered an anonymous trial: right after
+ * validation the trial status is asked (GET /api/public-trial), its limits
+ * are shown, the visitor confirms holding the rights on the video, and only
+ * then is the trial started (POST /api/public-trial) and the same chain —
+ * create the (ephemeral) project, queue the download, poll — resumed.
+ * No project creation is attempted before that, and no AccountGate is ever
+ * opened on that path.
+ *
+ * Every network wait has its own visible message, so the button never
+ * looks like it did nothing.
  */
 
 /** True when JobProgress is already showing this exact message, so the form must not repeat it. */
@@ -30,8 +48,12 @@ function shownByJobProgress(job: ParsedJob | null, message: string): boolean {
 type FormState =
   | { status: "idle" }
   | { status: "validating" }
+  | { status: "checking-trial"; videoId: string }
   | { status: "preparing" }
   | { status: "downloading"; videoId: string }
+  | { status: "validated"; videoId: string }
+  | { status: "trial-offer"; videoId: string; limits: PublicTrialLimitsSummary }
+  | { status: "starting-trial"; videoId: string; limits: PublicTrialLimitsSummary }
   | { status: "success"; videoId: string; projectId: string }
   | { status: "error"; error: string };
 
@@ -53,6 +75,8 @@ export function YoutubeUrlForm() {
   const [state, setState] = useState<FormState>({ status: "idle" });
   const [job, setJob] = useState<ParsedJob | null>(null);
   const [accountGateOpen, setAccountGateOpen] = useState(false);
+  const [trialRightsConfirmed, setTrialRightsConfirmed] = useState(false);
+  const [trialLimits, setTrialLimits] = useState<PublicTrialLimitsSummary | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -60,7 +84,11 @@ export function YoutubeUrlForm() {
   }, []);
 
   const busy =
-    state.status === "validating" || state.status === "preparing" || state.status === "downloading";
+    state.status === "validating" ||
+    state.status === "checking-trial" ||
+    state.status === "preparing" ||
+    state.status === "downloading" ||
+    state.status === "starting-trial";
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -94,7 +122,33 @@ export function YoutubeUrlForm() {
       return;
     }
 
-    // 2. A downloaded video has to land somewhere the user owns.
+    // 2. A signed-out visitor on a trial-enabled server goes straight to the
+    //    trial offer: creating a project first would only end in a 401.
+    //    Trial off, or an account already signed in: the existing chain.
+    setState({ status: "checking-trial", videoId });
+    const trial = await fetchPublicTrialStatus();
+    if (controller.signal.aborted) return;
+    if (trial.enabled && !trial.account) {
+      setTrialRightsConfirmed(false);
+      setState({ status: "trial-offer", videoId, limits: trial.limits });
+      return;
+    }
+
+    await createProjectAndDownload(videoId, controller);
+  }
+
+  /**
+   * Steps 3–5 of the chain. Shared by the account path and by the public
+   * trial, which runs it again once the trial cookie has been set. `trial`
+   * is passed explicitly rather than read from state: handleStartTrial calls
+   * this in the same tick as setTrialLimits, before any re-render.
+   */
+  async function createProjectAndDownload(
+    videoId: string,
+    controller: AbortController,
+    trial: { limits: PublicTrialLimitsSummary } | null = null
+  ) {
+    // 3. A downloaded video has to land somewhere the user owns.
     setState({ status: "preparing" });
     let projectId: string;
     try {
@@ -104,8 +158,15 @@ export function YoutubeUrlForm() {
         body: JSON.stringify({ title: `YouTube ${videoId}` }),
       });
       if (res.status === 401) {
-        setAccountGateOpen(true);
-        setState({ status: "idle" });
+        // Safety net only: the trial was checked up front, but the session
+        // may have expired since, or that check may have failed transiently.
+        const trial = await fetchPublicTrialStatus();
+        if (trial.enabled && !trial.account) {
+          setTrialRightsConfirmed(false);
+          setState({ status: "trial-offer", videoId, limits: trial.limits });
+          return;
+        }
+        setState({ status: "validated", videoId });
         return;
       }
       const json = await readJson(res);
@@ -120,15 +181,21 @@ export function YoutubeUrlForm() {
       return;
     }
 
-    // 3. Queue the real download.
+    // 4. Queue the real download.
     let queued: ParsedJob;
     try {
       const res = await fetch("/api/download-youtube", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url, projectId }),
+        // A trial download has no account behind it: the server requires the
+        // visitor's own rights confirmation on the request itself.
+        body: JSON.stringify(trial ? { url, projectId, rightsConfirmed: true } : { url, projectId }),
       });
       if (res.status === 401) {
+        if (trial) {
+          setState({ status: "error", error: "L'essai public a expiré. Rechargez la page pour en démarrer un nouveau." });
+          return;
+        }
         setAccountGateOpen(true);
         setState({ status: "idle" });
         return;
@@ -147,7 +214,7 @@ export function YoutubeUrlForm() {
     setJob(queued);
     setState({ status: "downloading", videoId });
 
-    // 4. Follow the job to its real conclusion.
+    // 5. Follow the job to its real conclusion.
     try {
       const finished = await pollJobUntilDone(queued.id, {
         signal: controller.signal,
@@ -171,14 +238,39 @@ export function YoutubeUrlForm() {
     }
   }
 
+  /** Public trial: only after the visitor has seen the limits and confirmed the rights. */
+  async function handleStartTrial() {
+    if (state.status !== "trial-offer" || !trialRightsConfirmed) return;
+    const { videoId, limits } = state;
+    setState({ status: "starting-trial", videoId, limits });
+
+    try {
+      const res = await fetch("/api/public-trial", { method: "POST" });
+      const json = await readJson(res);
+      if (!res.ok || json?.ok !== true) {
+        setState({ status: "error", error: errorFrom(json, "L'essai public n'a pas pu démarrer.") });
+        return;
+      }
+    } catch {
+      setState({ status: "error", error: "Impossible de contacter le serveur." });
+      return;
+    }
+    setTrialLimits(limits);
+
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    await createProjectAndDownload(videoId, controller, { limits });
+  }
+
   const buttonLabel =
-    state.status === "validating"
+    state.status === "validating" || state.status === "checking-trial"
       ? "Vérification…"
       : state.status === "preparing"
         ? "Préparation…"
         : state.status === "downloading"
           ? "Téléchargement…"
-          : "Valider et télécharger";
+          : "Valider le lien";
 
   return (
     <div className="w-full max-w-xl">
@@ -217,10 +309,27 @@ export function YoutubeUrlForm() {
         </button>
       </form>
 
-      <p id="youtube-url-help" className="mt-2 text-xs text-zinc-500">
-        Le lien est vérifié, puis la vidéo est téléchargée dans un nouveau projet pour être
-        analysée. N&apos;utilisez que des contenus dont vous détenez les droits : rien n&apos;est
-        jamais publié, et l&apos;export reste bloqué tant que vous ne les avez pas confirmés.
+      <div id="youtube-url-help" className="mt-2 flex flex-col gap-1 text-xs text-zinc-500">
+        <p>
+          Le lien est d&apos;abord vérifié. Après confirmation de vos droits sur la vidéo, elle peut être
+          téléchargée et traitée sans compte via l&apos;essai public.
+        </p>
+        <p>
+          Rien n&apos;est publié : l&apos;export de test reste filigrané, et détenir les droits sur la vidéo reste
+          obligatoire.
+        </p>
+      </div>
+
+      <p className="mt-3 flex items-baseline gap-2 text-sm text-zinc-400">
+        <span aria-hidden="true" className="text-amber-400">
+          ↳
+        </span>
+        <span>
+          Essayez la démonstration sans créer de compte{" "}
+          <a href="#studio" className="text-zinc-100 underline underline-offset-4">
+            plus bas
+          </a>
+        </span>
       </p>
 
       {job && (
@@ -230,14 +339,77 @@ export function YoutubeUrlForm() {
       )}
 
       <div id="youtube-url-result" role="status" aria-live="polite" className="mt-3">
+        {state.status === "validating" && (
+          <p className="text-sm text-zinc-400">Vérification du lien YouTube…</p>
+        )}
+        {state.status === "checking-trial" && (
+          <p className="text-sm text-zinc-400">
+            Lien validé (id vidéo <code className="font-mono">{state.videoId}</code>). Vérification de
+            l&apos;accès…
+          </p>
+        )}
+        {state.status === "preparing" && (
+          <p className="text-sm text-zinc-400">Création du projet…</p>
+        )}
         {state.status === "downloading" && (
           <p className="text-sm text-zinc-400">
             Lien validé (id vidéo <code className="font-mono">{state.videoId}</code>). Téléchargement
             de la vidéo en cours…
           </p>
         )}
+        {(state.status === "trial-offer" || state.status === "starting-trial") && (
+          <div className="space-y-3 rounded-lg border border-sky-400/30 bg-sky-400/5 px-4 py-3 text-sm text-sky-100">
+            <p>
+              Lien YouTube valide (id vidéo <code className="font-mono">{state.videoId}</code>). Vous pouvez le
+              traiter sans compte dans l&apos;essai public :
+            </p>
+            <PublicTrialNotice limits={state.limits} />
+            <label className="flex items-start gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={trialRightsConfirmed}
+                onChange={(e) => setTrialRightsConfirmed(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Je confirme détenir les droits sur cette vidéo, ou être autorisé à l&apos;utiliser, pour ce test.
+              </span>
+            </label>
+            <button
+              type="button"
+              onClick={handleStartTrial}
+              disabled={!trialRightsConfirmed || state.status === "starting-trial"}
+              className="rounded-lg bg-sky-300 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {state.status === "starting-trial" ? "Démarrage…" : "Démarrer l'essai public"}
+            </button>
+            {state.status === "starting-trial" && (
+              <p className="text-xs text-sky-200/80">Démarrage de l&apos;essai public…</p>
+            )}
+          </div>
+        )}
+        {state.status === "validated" && (
+          <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+            <p>
+              Lien YouTube valide (id vidéo <code className="font-mono">{state.videoId}</code>).
+            </p>
+            <p className="mt-1 text-xs text-amber-100/70">
+              L&apos;essai public sans compte n&apos;est pas ouvert pour le moment : vous pouvez explorer la
+              démonstration en attendant.
+            </p>
+            <a href="#studio" className="mt-3 inline-block rounded-lg border border-amber-300/40 px-3 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-300/10">
+              Explorer le studio ↓
+            </a>
+          </div>
+        )}
         {state.status === "success" && (
           <div className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-300">
+            {trialLimits && (
+              <p className="mb-2 text-xs text-sky-200">
+                Projet d&apos;essai éphémère : supprimé automatiquement avec ses fichiers au bout de{" "}
+                {formatTrialDuration(trialLimits.ttlMinutes)}.
+              </p>
+            )}
             <p>
               Vidéo téléchargée (id vidéo <code className="font-mono">{state.videoId}</code>) et
               associée à un nouveau projet.

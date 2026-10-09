@@ -55,6 +55,20 @@ describe("YoutubeSourcePanel", () => {
     expect(screen.getByText(/projet enregistré/i)).toBeInTheDocument();
   });
 
+  it("keeps the public demo button clickable and opens the account gate", () => {
+    const onAccountRequired = vi.fn();
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<YoutubeSourcePanel requiresAccount onAccountRequired={onAccountRequired} />);
+    fireEvent.change(screen.getByLabelText(/lien youtube/i), { target: { value: VALID_URL } });
+
+    const button = screen.getByRole("button", { name: /se connecter pour télécharger/i });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(onAccountRequired).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps the button disabled while the field is empty", () => {
     render(<YoutubeSourcePanel projectId="proj-1" />);
     expect(screen.getByRole("button", { name: /valider et télécharger/i })).toBeDisabled();

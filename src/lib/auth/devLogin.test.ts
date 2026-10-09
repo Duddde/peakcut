@@ -18,8 +18,9 @@ describe("isDevLoginEnabled", () => {
     expect(isDevLoginEnabled(env({ NODE_ENV: "test", PEAKCUT_DEV_LOGIN: "1" }))).toBe(true);
   });
 
-  it("stays off in production even when the variable is set", () => {
+  it("keeps password login off in production unless explicitly enabled", () => {
     expect(isDevLoginEnabled(env({ NODE_ENV: "production", PEAKCUT_DEV_LOGIN: "1" }))).toBe(false);
+    expect(isDevLoginEnabled(env({ NODE_ENV: "production", PEAKCUT_PASSWORD_LOGIN: "1" }))).toBe(true);
   });
 
   it("only accepts the exact string \"1\", never a truthy-looking value", () => {

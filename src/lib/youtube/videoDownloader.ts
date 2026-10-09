@@ -137,7 +137,28 @@ const UNAVAILABLE_PATTERNS = [
   /this video is unavailable/i,
   /requested format is not available/i,
   /age[- ]restricted/i,
+  /not a bot/i,
+  /drm/i,
+  /requires payment/i,
+  /join this channel/i,
 ];
+
+/**
+ * Plain-language reason for a refusal YouTube itself issued. PeakCut never
+ * works around these (no bot-check solving, no borrowed sign-in, no DRM or
+ * paywall bypass): the video simply stays refused.
+ */
+function unavailableReason(stderr: string): string {
+  if (/not a bot|sign in to confirm/i.test(stderr)) {
+    return "YouTube exige une vérification (connexion ou contrôle anti-robot) pour cette vidéo ; PeakCut ne la contourne pas.";
+  }
+  if (/drm/i.test(stderr)) return "Cette vidéo est protégée par DRM ; PeakCut ne la télécharge pas.";
+  if (/requires payment|members[- ]only|join this channel/i.test(stderr)) {
+    return "Cette vidéo est réservée (payante ou membres) ; PeakCut ne la télécharge pas.";
+  }
+  if (/age[- ]restricted/i.test(stderr)) return "Cette vidéo est soumise à une restriction d'âge ; PeakCut ne la télécharge pas.";
+  return "YouTube a refusé de servir cette vidéo (privée, supprimée ou indisponible dans ce pays).";
+}
 
 function classifyStderr(stderr: string): VideoDownloadErrorCode | null {
   if (UNAVAILABLE_PATTERNS.some((pattern) => pattern.test(stderr))) {
@@ -283,7 +304,7 @@ export function createYtDlpDownloader(options: YtDlpDownloaderOptions): VideoDow
       throw new VideoDownloadError(
         code,
         code === "video-unavailable"
-          ? `Cette vidéo n'est pas accessible publiquement : ${firstLine(result.stderr, "YouTube a refusé de la servir.")}`
+          ? `Cette vidéo n'est pas accessible publiquement. ${unavailableReason(result.stderr)} (${firstLine(result.stderr, "refus YouTube")})`
           : `Impossible de lire les métadonnées de la vidéo : ${firstLine(result.stderr, "erreur inconnue.")}`
       );
     }
@@ -394,7 +415,9 @@ export function createYtDlpDownloader(options: YtDlpDownloaderOptions): VideoDow
           const code = classifyStderr(result.stderr) ?? "download-failed";
           throw new VideoDownloadError(
             code,
-            `Le téléchargement a échoué : ${firstLine(result.stderr, "yt-dlp s'est arrêté avec une erreur.")}`
+            code === "video-unavailable"
+              ? `Le téléchargement a été refusé par YouTube. ${unavailableReason(result.stderr)} (${firstLine(result.stderr, "refus YouTube")})`
+              : `Le téléchargement a échoué : ${firstLine(result.stderr, "yt-dlp s'est arrêté avec une erreur.")}`
           );
         }
 

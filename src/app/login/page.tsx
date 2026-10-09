@@ -29,7 +29,7 @@ export default async function LoginPage({
         <p className="text-sm font-semibold tracking-tight text-amber-300">PeakCut</p>
         <h1 className="mt-3 text-2xl font-bold">Accéder à votre studio</h1>
         <p className="mt-3 text-sm text-zinc-400">
-          Connectez-vous avec Google pour retrouver vos projets et vos exports.
+          Connectez-vous avec Google ou avec une adresse email et un mot de passe pour retrouver vos projets et vos exports.
         </p>
 
         <div className="mt-8">
@@ -39,10 +39,9 @@ export default async function LoginPage({
         {devLogin && (
           <div className="mt-8 border-t border-white/10 pt-6">
             <p className="mb-4 rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-left text-[11px] text-amber-200/90">
-              <strong className="font-semibold">Connexion locale (développement).</strong> Affichée
-              parce que <code className="font-mono">PEAKCUT_DEV_LOGIN=1</code> et que cette
-              instance n&apos;est pas en production. Compte réel, mot de passe réellement vérifié —
-              ce n&apos;est pas un contournement de l&apos;authentification.
+              <strong className="font-semibold">Connexion email.</strong> Utilisez votre adresse email et
+              votre mot de passe, ou continuez avec Google. Les mots de passe sont vérifiés côté serveur
+              et ne sont jamais exposés.
             </p>
             <DevLoginForm callbackUrl={callbackUrl} />
           </div>
