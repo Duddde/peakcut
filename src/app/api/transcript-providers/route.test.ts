@@ -14,7 +14,6 @@ describe("GET /api/transcript-providers", () => {
     expect(json.ok).toBe(true);
     expect(Array.isArray(json.providers)).toBe(true);
     const ids = json.providers.map((p: { id: string }) => p.id);
-    expect(ids).toContain("mock-deterministic");
     expect(ids).toContain("openai-gpt-4o-transcribe-diarize");
     expect(ids).toContain("assemblyai");
 
@@ -25,11 +24,18 @@ describe("GET /api/transcript-providers", () => {
     }
   });
 
-  it("marks the mock provider as always configured", async () => {
+  it("never offers the deterministic mock: a real project must not be transcribed with a canned script", async () => {
     const res = await GET();
     const json = await res.json();
-    const mock = json.providers.find((p: { id: string }) => p.id === "mock-deterministic");
-    expect(mock.configured).toBe(true);
+    const ids = json.providers.map((p: { id: string }) => p.id);
+    expect(ids).not.toContain("mock-deterministic");
+  });
+
+  it("offers nothing that is configured until an API key is set", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "");
+    vi.stubEnv("ASSEMBLYAI_API_KEY", "");
+    const json = await (await GET()).json();
+    expect(json.providers.every((p: { configured: boolean }) => !p.configured)).toBe(true);
   });
 
   it("reflects OPENAI_API_KEY presence for the OpenAI provider", async () => {

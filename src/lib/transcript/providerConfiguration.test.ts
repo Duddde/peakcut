@@ -6,8 +6,8 @@ describe("isProviderConfigured", () => {
     vi.unstubAllEnvs();
   });
 
-  it("is always true for the deterministic mock provider", () => {
-    expect(isProviderConfigured("mock-deterministic")).toBe(true);
+  it("is false for the deterministic mock, which is no longer a selectable provider", () => {
+    expect(isProviderConfigured("mock-deterministic")).toBe(false);
   });
 
   it("is false for OpenAI when OPENAI_API_KEY is unset", () => {

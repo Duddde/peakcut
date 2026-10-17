@@ -6,8 +6,6 @@
  */
 export function isProviderConfigured(providerId: string): boolean {
   switch (providerId) {
-    case "mock-deterministic":
-      return true;
     case "openai-gpt-4o-transcribe-diarize":
       return Boolean(process.env.OPENAI_API_KEY);
     case "assemblyai":

@@ -42,10 +42,32 @@ export interface OpenCvFaceDetectionEngineOptions {
   scriptPath?: string;
   timeoutMs?: number;
   availabilityTimeoutMs?: number;
+  /** Frames sampled per second of source. Defaults to DEFAULT_SAMPLE_FPS. */
+  sampleFps?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 20_000;
+/**
+ * Detection is proportional to the length of the source, not to a round
+ * trip: FFmpeg has to walk the whole file to hand back the sampled frames.
+ * A 10-minute 1080p60 video measured ~34s end to end, so the original 20s
+ * bound could only ever have fitted a short clip — any real long-form
+ * source died on OpenCvEngineTimeoutError before detecting anything.
+ * Overridable with PEAKCUT_TRACKING_TIMEOUT_MS.
+ */
+const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
+
+/**
+ * One sampled frame per second. The crop derived from a track is static
+ * per segment (deriveCropFromTrack reads the box at one instant), so a
+ * finer sampling rate costs decode time without changing a single crop.
+ */
+const DEFAULT_SAMPLE_FPS = 1;
+
+function configuredTimeoutMs(): number {
+  const raw = Number(process.env.PEAKCUT_TRACKING_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -167,12 +189,14 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
   private readonly scriptPath: string;
   private readonly timeoutMs: number;
   private readonly availabilityTimeoutMs: number;
+  private readonly sampleFps: number;
 
   constructor(options: OpenCvFaceDetectionEngineOptions = {}) {
     this.pythonBinary = options.pythonBinary ?? process.env.PEAKCUT_PYTHON_BINARY ?? "python3";
     this.scriptPath = options.scriptPath ?? path.join(process.cwd(), "scripts", "vision", "track_faces.py");
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs ?? configuredTimeoutMs();
     this.availabilityTimeoutMs = options.availabilityTimeoutMs ?? DEFAULT_AVAILABILITY_TIMEOUT_MS;
+    this.sampleFps = options.sampleFps ?? DEFAULT_SAMPLE_FPS;
   }
 
   /** Cheap real check: can this Python + OpenCV actually run? Never throws. */
@@ -188,7 +212,7 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
   async detect(input: SubjectDetectionInput): Promise<DetectedBoundingBox[]> {
     const { stdout, stderr, code, timedOut } = await runProcess(
       this.pythonBinary,
-      [this.scriptPath, input.mediaPath],
+      [this.scriptPath, input.mediaPath, String(this.sampleFps)],
       this.timeoutMs
     );
 

@@ -75,12 +75,12 @@ describe("convertAssemblyAiTranscript", () => {
     expect(transcript.words[0].endSec).toBe(0.2);
   });
 
-  it("defaults language to 'fr' when language_code is absent", () => {
+  it("marks the language undetermined when language_code is absent, rather than guessing French", () => {
     const transcript = convertAssemblyAiTranscript(
       { status: "completed", words: [{ text: "x", start: 0, end: 100 }] },
       PROVIDER_ID
     );
-    expect(transcript.language).toBe("fr");
+    expect(transcript.language).toBe("und");
   });
 
   it("uses a neutral 0.5 confidence when missing, rather than inventing certainty", () => {

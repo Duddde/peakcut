@@ -83,7 +83,9 @@ export function convertAssemblyAiTranscript(payload: unknown, providerId: string
   });
 
   return {
-    language: typeof body.language_code === "string" ? body.language_code : "fr",
+    // "und" (BCP-47 undetermined) rather than guessing French for audio
+    // the provider did not identify.
+    language: typeof body.language_code === "string" ? body.language_code : "und",
     providerId,
     words,
   };

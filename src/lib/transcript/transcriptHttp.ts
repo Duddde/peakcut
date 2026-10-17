@@ -44,6 +44,27 @@ export class LocalMediaFileNotFoundError extends Error {
   }
 }
 
+function megabytes(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+}
+
+/**
+ * The media is still over the provider's upload limit after its audio
+ * track was extracted — i.e. it is simply too long. Splitting a long
+ * recording into several requests is not implemented, so this fails
+ * explicitly rather than sending a truncated file and returning a
+ * transcript that silently stops halfway.
+ */
+export class TranscriptMediaTooLargeError extends Error {
+  constructor(providerId: string, sizeBytes: number, limitBytes: number) {
+    super(
+      `L'audio extrait pèse ${megabytes(sizeBytes)}, au-delà de la limite de ${megabytes(limitBytes)} du fournisseur "${providerId}". ` +
+        "Transcrivez un extrait plus court."
+    );
+    this.name = "TranscriptMediaTooLargeError";
+  }
+}
+
 /** Throws LocalMediaFileNotFoundError if mediaPath does not resolve to a real, readable file. */
 export async function assertLocalFileExists(mediaPath: string): Promise<void> {
   try {
@@ -54,6 +75,30 @@ export async function assertLocalFileExists(mediaPath: string): Promise<void> {
   } catch {
     throw new LocalMediaFileNotFoundError(mediaPath);
   }
+}
+
+/**
+ * Node's fetch reports every transport failure as a bare
+ * "TypeError: fetch failed" and hides the real reason in `cause`. A
+ * provider dying on `UND_ERR_HEADERS_TIMEOUT` was therefore
+ * indistinguishable, in the job's recorded error, from DNS failing or the
+ * connection being refused — three identical messages, three different
+ * things to do about it. The cause is folded into the message here.
+ */
+function withNetworkCause(err: unknown, providerId: string): unknown {
+  if (!(err instanceof Error) || err.message !== "fetch failed") return err;
+  const cause = err.cause;
+  const detail =
+    cause instanceof Error
+      ? `${(cause as NodeJS.ErrnoException).code ?? cause.name} — ${cause.message}`
+      : typeof cause === "string"
+        ? cause
+        : null;
+  if (!detail) return err;
+  const wrapped = new Error(`Appel au fournisseur "${providerId}" impossible : ${detail}`);
+  wrapped.name = err.name;
+  wrapped.cause = cause;
+  return wrapped;
 }
 
 /**
@@ -75,7 +120,7 @@ export async function fetchWithTimeout(
     if (err instanceof Error && err.name === "AbortError") {
       throw new TranscriptTimeoutError(providerId, timeoutMs);
     }
-    throw err;
+    throw withNetworkCause(err, providerId);
   } finally {
     clearTimeout(timer);
   }

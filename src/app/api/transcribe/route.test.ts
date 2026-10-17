@@ -66,13 +66,13 @@ describe("POST /api/transcribe", () => {
   it("returns 400 when providerId or sourcePath is missing", async () => {
     const POST = handler();
     expect((await POST(postRequest({ sourcePath }))).status).toBe(400);
-    expect((await POST(postRequest({ providerId: "mock-deterministic" }))).status).toBe(400);
+    expect((await POST(postRequest({ providerId: "openai-gpt-4o-transcribe-diarize" }))).status).toBe(400);
   });
 
   it("returns 400 for a sourcePath containing a path traversal segment", async () => {
     const POST = handler();
     const res = await POST(
-      postRequest({ providerId: "mock-deterministic", sourcePath: "../../etc/passwd" })
+      postRequest({ providerId: "openai-gpt-4o-transcribe-diarize", sourcePath: "../../etc/passwd" })
     );
     expect(res.status).toBe(400);
   });
@@ -89,24 +89,39 @@ describe("POST /api/transcribe", () => {
     const POST = handler();
     const outside = path.join(workDir, "outside.mp4");
     await writeFile(outside, "x");
-    const res = await POST(postRequest({ providerId: "mock-deterministic", sourcePath: outside }));
+    const res = await POST(
+      postRequest({ providerId: "openai-gpt-4o-transcribe-diarize", sourcePath: outside })
+    );
     expect(res.status).toBe(403);
   });
 
   it("returns 404 when sourcePath points to a nonexistent file inside the uploads dir", async () => {
     const POST = handler();
     const missing = path.join(uploadsDir, "missing.mp4");
-    const res = await POST(postRequest({ providerId: "mock-deterministic", sourcePath: missing }));
+    const res = await POST(
+      postRequest({ providerId: "openai-gpt-4o-transcribe-diarize", sourcePath: missing })
+    );
     expect(res.status).toBe(404);
   });
 
-  it("succeeds end-to-end with the real deterministic mock provider from the registry", async () => {
-    const POST = handler(); // default registry, no injection needed for the mock
-    const res = await POST(postRequest({ providerId: "mock-deterministic", sourcePath }));
+  it("succeeds end-to-end and serialises the transcript the provider returned", async () => {
+    const stub: TranscriptProvider = {
+      id: "stub-test-provider",
+      displayName: "Fournisseur injecté pour le test",
+      async transcribe() {
+        return {
+          language: "fr",
+          providerId: "stub-test-provider",
+          words: [{ text: "Bonjour", startSec: 0, endSec: 0.4, speaker: "A", confidence: 0.9 }],
+        };
+      },
+    };
+    const POST = handler([stub]);
+    const res = await POST(postRequest({ providerId: "stub-test-provider", sourcePath }));
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
-    expect(json.provider_id).toBe("mock-deterministic");
+    expect(json.provider_id).toBe("stub-test-provider");
     expect(json.transcript.words.length).toBeGreaterThan(0);
     expect(json.transcript.words[0]).toHaveProperty("start_sec");
     expect(json.transcript.words[0]).toHaveProperty("end_sec");
@@ -193,8 +208,17 @@ describe("POST /api/transcribe", () => {
   });
 
   it("never reveals the absolute uploads directory path in any response", async () => {
-    const POST = handler();
-    const res = await POST(postRequest({ providerId: "mock-deterministic", sourcePath }));
+    // A provider that actually returns, so this checks a real success
+    // payload rather than an "unknown provider" error.
+    const stub: TranscriptProvider = {
+      id: "stub-path-leak",
+      displayName: "Fournisseur injecté pour le test",
+      async transcribe() {
+        return { language: "fr", providerId: "stub-path-leak", words: [] };
+      },
+    };
+    const POST = handler([stub]);
+    const res = await POST(postRequest({ providerId: "stub-path-leak", sourcePath }));
     const text = JSON.stringify(await res.json());
     expect(text).not.toContain(uploadsDir);
     expect(text).not.toContain(workDir);

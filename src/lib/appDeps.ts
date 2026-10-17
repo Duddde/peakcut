@@ -34,3 +34,15 @@ export function resolveAppDeps(): AppDeps {
   const db = getSharedDatabase(path);
   return { db, authSecret };
 }
+
+/**
+ * The same migrated, process-wide connection as resolveAppDeps(), for the
+ * one caller that needs the database without being a request handler: the
+ * in-server job worker (src/lib/jobs/inlineWorker.ts). It must not require
+ * an auth secret — a worker never verifies a session — and must not open a
+ * second connection to the same file from inside this process.
+ */
+export function resolveSharedDatabase(): DatabaseSync {
+  const { path } = getDbConfig();
+  return getSharedDatabase(path);
+}

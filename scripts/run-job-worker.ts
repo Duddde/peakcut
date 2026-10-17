@@ -1,17 +1,11 @@
 #!/usr/bin/env -S npx tsx
-import path from "node:path";
 import { loadEnvFiles } from "../src/lib/env/loadEnvFiles";
 import { openDatabase } from "../src/lib/db/connection";
 import { runMigrations } from "../src/lib/db/migrations";
 import { getDbConfig } from "../src/lib/db/config";
-import { SqliteJobRepository } from "../src/lib/jobs/JobRepository";
-import { createDefaultJobHandlers } from "../src/lib/jobs/handlers";
+import { createJobWorkerRuntime, TRIAL_CLEANUP_INTERVAL_MS } from "../src/lib/jobs/runtime";
 import { runJobWorker } from "../src/lib/jobs/worker";
 import { JOB_KINDS, type JobKind } from "../src/lib/jobs/types";
-import { cleanupExpiredTrials, resolveTrialStorageRoots } from "../src/lib/publicTrial/cleanup";
-
-/** How often a long-running worker sweeps expired public-trial projects (and their files). */
-const TRIAL_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Standalone job-worker process — entirely separate from the Next.js HTTP
@@ -22,7 +16,11 @@ const TRIAL_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
  * invocation).
  *
  * This process is never started automatically by anything else in this
- * repo — see deploy/peakcut-worker.service for why.
+ * repo — see deploy/peakcut-worker.service for why. In development the
+ * same loop is instead run inside the Next.js server (see
+ * src/lib/jobs/inlineWorker.ts), so there is nothing to launch on the
+ * side; both entry points share createJobWorkerRuntime(), and
+ * claimNextJob() is transactional, so running both at once is harmless.
  *
  * Unlike the Next.js server, a plain Node process gets no .env loading for
  * free, so this script does it itself before reading any config. Without
@@ -83,19 +81,11 @@ async function main() {
   const db = openDatabase(dbPath);
   runMigrations(db);
 
-  const repo = new SqliteJobRepository(db);
-  const exportsBaseDir = process.env.PEAKCUT_EXPORTS_DIR ?? path.join(process.cwd(), ".data", "exports");
-  const downloadsBaseDir = process.env.PEAKCUT_DOWNLOADS_DIR ?? path.join(process.cwd(), ".data", "downloads");
-  const handlers = createDefaultJobHandlers({ db, exportsBaseDir, downloadsBaseDir });
+  const { repo, handlers, sweepExpiredTrials } = createJobWorkerRuntime(db);
 
-  // Expired public trials are swept here as well as on each new trial
-  // start, so their files go away even when nobody starts a new trial.
-  // Runs whatever PEAKCUT_PUBLIC_TRIAL says: turning the flag off must not
-  // strand data that was created while it was on.
-  const trialRoots = { ...resolveTrialStorageRoots(), exportsBaseDir, downloadsBaseDir };
   const sweepTrials = async () => {
     try {
-      const removed = await cleanupExpiredTrials(db, { roots: trialRoots });
+      const removed = await sweepExpiredTrials();
       if (removed > 0) process.stdout.write(`[peakcut-worker] ${removed} essai(s) public(s) expiré(s) supprimé(s).\n`);
     } catch (err) {
       process.stderr.write(`[peakcut-worker] Nettoyage des essais impossible : ${err instanceof Error ? err.message : String(err)}\n`);

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { createProjectsCreateHandler, createProjectsListHandler } from "./route";
 import { createTestAppDeps } from "../../../../test/helpers/testAppDeps";
@@ -105,5 +105,57 @@ describe("POST /api/projects", () => {
     const json = await res.json();
     expect(typeof json.project.title).toBe("string");
     expect(json.project.title.length).toBeGreaterThan(0);
+  });
+});
+
+describe("solo mode (PEAKCUT_SOLO_USER=1)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("serves a cookie-less request as the single operator instead of 401", async () => {
+    vi.stubEnv("PEAKCUT_SOLO_USER", "1");
+    const deps = createTestAppDeps();
+
+    const create = createProjectsCreateHandler(deps);
+    const created = await create(
+      requestWithCookie("http://localhost/api/projects", undefined, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Projet solo" }),
+      })
+    );
+    expect(created.status).toBe(201);
+
+    const list = createProjectsListHandler(deps);
+    const res = await list(requestWithCookie("http://localhost/api/projects"));
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.projects.map((p: { title: string }) => p.title)).toEqual(["Projet solo"]);
+  });
+
+  it("adopts the pre-existing account, so projects created before solo mode stay listed", async () => {
+    const deps = createTestAppDeps();
+    const owner = makeAuthedUserAndCookie(deps, "dev@local.test");
+    await createProjectsCreateHandler(deps)(
+      requestWithCookie("http://localhost/api/projects", owner.cookie, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Projet d'avant" }),
+      })
+    );
+
+    vi.stubEnv("PEAKCUT_SOLO_USER", "1");
+    const res = await createProjectsListHandler(deps)(requestWithCookie("http://localhost/api/projects"));
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.projects.map((p: { title: string }) => p.title)).toEqual(["Projet d'avant"]);
+  });
+
+  it("still answers 401 when the flag is absent", async () => {
+    const deps = createTestAppDeps();
+    const res = await createProjectsListHandler(deps)(requestWithCookie("http://localhost/api/projects"));
+    expect(res.status).toBe(401);
   });
 });

@@ -1,4 +1,6 @@
+import { redirect } from "next/navigation";
 import { isDevLoginEnabled } from "@/lib/auth/devLogin";
+import { isSoloModeEnabled } from "@/lib/auth/soloMode";
 import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { DevLoginForm } from "@/components/auth/DevLoginForm";
 
@@ -21,6 +23,12 @@ export default async function LoginPage({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const callbackUrl = safeCallbackUrl((await searchParams).callbackUrl);
+
+  // Solo mode has nothing to sign into: the caller is already the single
+  // account. Nothing links here any more in that mode, so this only
+  // catches a bookmark or a hand-typed URL.
+  if (isSoloModeEnabled()) redirect(callbackUrl);
+
   const devLogin = isDevLoginEnabled();
 
   return (

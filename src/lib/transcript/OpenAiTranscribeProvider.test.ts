@@ -1,15 +1,18 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { OpenAiTranscribeProvider } from "./OpenAiTranscribeProvider";
+import { OpenAiTranscribeProvider, OPENAI_MAX_UPLOAD_BYTES } from "./OpenAiTranscribeProvider";
 import { TranscriptProviderNotConfiguredError } from "./TranscriptProvider";
 import {
   LocalMediaFileNotFoundError,
   TranscriptHttpError,
   TranscriptInvalidPayloadError,
+  TranscriptMediaTooLargeError,
   TranscriptTimeoutError,
 } from "./transcriptHttp";
+import type { ExtractedAudio } from "@/lib/ffmpeg/extractAudioForTranscription";
 
 describe("OpenAiTranscribeProvider", () => {
   let dir: string;
@@ -72,10 +75,12 @@ describe("OpenAiTranscribeProvider", () => {
     expect(capturedInit?.method).toBe("POST");
     const headers = capturedInit?.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer fake-key-for-test-only");
-    expect(capturedInit?.body).toBeInstanceOf(FormData);
     const body = capturedInit?.body as FormData;
     expect(body.get("model")).toBe("gpt-4o-transcribe-diarize");
     expect(body.get("response_format")).toBe("diarized_json");
+    // Without it the endpoint answers 400 "chunking_strategy is required
+    // for diarization models" — the whole request is wasted.
+    expect(body.get("chunking_strategy")).toBe("auto");
     expect(body.get("file")).toBeInstanceOf(Blob);
 
     expect(transcript.providerId).toBe("openai-gpt-4o-transcribe-diarize");
@@ -144,5 +149,103 @@ describe("OpenAiTranscribeProvider", () => {
       globalThis.fetch = originalFetch;
     }
     expect(realFetchCalled).toBe(false);
+  });
+});
+
+describe("OpenAiTranscribeProvider — média au-delà de la limite d'upload", () => {
+  let dir: string;
+  let bigMediaPath: string;
+
+  /** A real 20-minute 1080p download is tens of megabytes; the endpoint refuses anything over 25 MiB. */
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "peakcut-openai-big-"));
+    bigMediaPath = path.join(dir, "long-video.mp4");
+    await writeFile(bigMediaPath, Buffer.alloc(OPENAI_MAX_UPLOAD_BYTES + 1024));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  async function fakeExtraction(sizeBytes: number) {
+    const audioPath = path.join(dir, "extrait.mp3");
+    await writeFile(audioPath, Buffer.alloc(sizeBytes));
+    const cleanup = vi.fn(async () => {
+      await rm(audioPath, { force: true });
+    });
+    const extractAudio = vi.fn(async (): Promise<ExtractedAudio> => ({ path: audioPath, sizeBytes, cleanup }));
+    return { audioPath, cleanup, extractAudio };
+  }
+
+  function okFetch() {
+    let capturedInit: RequestInit | undefined;
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      capturedInit = init;
+      return new Response(
+        JSON.stringify({ language: "fr", words: [{ word: "Bonjour", start: 0, end: 0.4, speaker: "A", confidence: 0.9 }] }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    return { fetchImpl, captured: () => capturedInit };
+  }
+
+  it("extracts the audio track and uploads that instead of the video", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+    const { extractAudio, cleanup } = await fakeExtraction(2 * 1024 * 1024);
+    const { fetchImpl, captured } = okFetch();
+
+    const transcript = await new OpenAiTranscribeProvider({ fetchImpl, extractAudio }).transcribe({
+      mediaPath: bigMediaPath,
+    });
+
+    expect(extractAudio).toHaveBeenCalledWith(bigMediaPath);
+    expect(transcript.words).toHaveLength(1);
+
+    const body = captured()?.body as FormData;
+    const uploaded = body.get("file") as File;
+    expect(uploaded.name).toBe("extrait.mp3");
+    expect(uploaded.size).toBe(2 * 1024 * 1024);
+
+    // The temporary copy of the user's audio never outlives the request.
+    expect(cleanup).toHaveBeenCalled();
+  });
+
+  it("refuses explicitly when even the extracted audio is over the limit, rather than truncating it", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+    const { extractAudio, cleanup } = await fakeExtraction(OPENAI_MAX_UPLOAD_BYTES + 1);
+    const { fetchImpl } = okFetch();
+
+    await expect(
+      new OpenAiTranscribeProvider({ fetchImpl, extractAudio }).transcribe({ mediaPath: bigMediaPath })
+    ).rejects.toBeInstanceOf(TranscriptMediaTooLargeError);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(cleanup).toHaveBeenCalled();
+  });
+
+  it("cleans the extracted audio up even when the request fails", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+    const { extractAudio, cleanup } = await fakeExtraction(1024);
+    const fetchImpl = vi.fn(async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
+
+    await expect(
+      new OpenAiTranscribeProvider({ fetchImpl, extractAudio }).transcribe({ mediaPath: bigMediaPath })
+    ).rejects.toBeInstanceOf(TranscriptHttpError);
+
+    expect(cleanup).toHaveBeenCalled();
+  });
+
+  it("leaves a file that already fits completely untouched — no ffmpeg, no re-encoding", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+    const smallPath = path.join(dir, "court.mp4");
+    await writeFile(smallPath, "petit fichier");
+    const extractAudio = vi.fn();
+    const { fetchImpl, captured } = okFetch();
+
+    await new OpenAiTranscribeProvider({ fetchImpl, extractAudio }).transcribe({ mediaPath: smallPath });
+
+    expect(extractAudio).not.toHaveBeenCalled();
+    expect(((captured()?.body as FormData).get("file") as File).name).toBe("court.mp4");
   });
 });

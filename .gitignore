@@ -47,3 +47,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .gstack/
+
+# venv optionnel de detection de visage (jamais commite)
+/.venv-vision/

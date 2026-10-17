@@ -13,13 +13,15 @@ import {
 
 /**
  * Real transcription endpoint. Accepts a `providerId` (from the registry —
- * "mock-deterministic", "openai-gpt-4o-transcribe-diarize", or
- * "assemblyai") and a `sourcePath` that MUST resolve strictly inside the
+ * "openai-gpt-4o-transcribe-diarize" or "assemblyai") and a `sourcePath`
+ * that MUST resolve strictly inside the
  * configured uploads directory (defense against path traversal from a
  * crafted request, same pattern as /api/export-segment).
  *
- * There is no silent fallback: an unconfigured real provider fails with a
- * clear 503, never by quietly substituting the mock or another provider.
+ * There is no silent fallback: an unconfigured provider fails with a clear
+ * 503, never by quietly substituting another one. The deterministic mock
+ * is not in the registry at all (see registry.ts), so no request here can
+ * ever come back with a canned script.
  */
 export function createTranscribeHandler(deps: { uploadsBaseDir: string; providers?: TranscriptProvider[] }) {
   const resolvedUploadsBase = path.resolve(deps.uploadsBaseDir);

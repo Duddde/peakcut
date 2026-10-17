@@ -25,6 +25,7 @@ export interface UserRepository {
   findById(id: string): User | null;
   findByGoogleId(googleId: string): User | null;
   findOrCreateGoogleUser(email: string, googleId: string): User;
+  findOrCreateSoloUser(email: string): User;
 }
 
 function normalizeEmail(email: string): string {
@@ -105,6 +106,29 @@ export class SqliteUserRepository implements UserRepository {
     this.db
       .prepare("INSERT INTO users (id, email, password_hash, google_id, created_at) VALUES (?, ?, NULL, ?, ?)")
       .run(id, normalizedEmail, googleId, createdAt);
+
+    return { id, email: normalizedEmail, createdAt };
+  }
+
+  /**
+   * The single-operator account used by solo mode (see
+   * src/lib/auth/soloMode.ts). Created with neither a password_hash nor a
+   * google_id on purpose: it is an identity the server assigns, never one
+   * anybody can sign into, so turning solo mode back off leaves no
+   * loggable account behind.
+   */
+  findOrCreateSoloUser(email: string): User {
+    const normalizedEmail = normalizeEmail(email);
+    const existing = this.db.prepare("SELECT * FROM users WHERE email = ?").get(normalizedEmail) as
+      | UserRow
+      | undefined;
+    if (existing) return { id: existing.id, email: existing.email, createdAt: existing.created_at };
+
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare("INSERT INTO users (id, email, password_hash, google_id, created_at) VALUES (?, ?, NULL, NULL, ?)")
+      .run(id, normalizedEmail, createdAt);
 
     return { id, email: normalizedEmail, createdAt };
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertOpenAiDiarizedJson } from "./convertOpenAiDiarizedJson";
+import { convertOpenAiDiarizedJson, hasInterpolatedWordTimings } from "./convertOpenAiDiarizedJson";
 import { TranscriptInvalidPayloadError } from "../transcriptHttp";
 
 const PROVIDER_ID = "openai-gpt-4o-transcribe-diarize";
@@ -60,12 +60,12 @@ describe("convertOpenAiDiarizedJson", () => {
     expect(transcript.words[0].text).toBe("Ok");
   });
 
-  it("defaults language to 'fr' when absent", () => {
+  it("marks the language undetermined when the provider reports none", () => {
     const transcript = convertOpenAiDiarizedJson(
       { words: [{ word: "x", start: 0, end: 0.1 }] },
       PROVIDER_ID
     );
-    expect(transcript.language).toBe("fr");
+    expect(transcript.language).toBe("und");
   });
 
   it("uses a neutral 0.5 confidence when the API does not provide one, rather than inventing certainty", () => {
@@ -105,5 +105,92 @@ describe("convertOpenAiDiarizedJson", () => {
     expect(() =>
       convertOpenAiDiarizedJson({ segments: [{ speaker: "A", words: [] }] }, PROVIDER_ID)
     ).toThrow(TranscriptInvalidPayloadError);
+  });
+});
+
+describe("convertOpenAiDiarizedJson — segments diarisés sans mots", () => {
+  /**
+   * The shape gpt-4o-transcribe-diarize actually returns, captured from a
+   * real call: segments carrying text/speaker/start/end, and no word-level
+   * timings anywhere (timestamp_granularities is not available for this
+   * model). PeakCut is word-by-word, so the segment is split.
+   */
+  const REAL_SHAPE = {
+    text: "Relentlessly. Turn the AH-64 Apache",
+    task: "transcribe",
+    duration: 3,
+    segments: [
+      { type: "transcript.text.segment", id: "seg_1", speaker: "A", start: 0, end: 2.55, text: "Relentlessly. Turn the AH-64 Apache" },
+    ],
+    usage: { type: "duration", seconds: 3 },
+  };
+
+  it("splits a diarized segment into words that span exactly its window", () => {
+    const transcript = convertOpenAiDiarizedJson(REAL_SHAPE, "openai-gpt-4o-transcribe-diarize", "en");
+
+    expect(transcript.words.map((w) => w.text)).toEqual([
+      "Relentlessly.",
+      "Turn",
+      "the",
+      "AH-64",
+      "Apache",
+    ]);
+    expect(transcript.words[0].startSec).toBe(0);
+    // The last word closes on the segment's real end, never past it.
+    expect(transcript.words[transcript.words.length - 1].endSec).toBe(2.55);
+  });
+
+  it("keeps the words contiguous and ordered", () => {
+    const { words } = convertOpenAiDiarizedJson(REAL_SHAPE, "openai-gpt-4o-transcribe-diarize");
+
+    for (let i = 0; i < words.length; i++) {
+      expect(words[i].endSec).toBeGreaterThan(words[i].startSec);
+      if (i > 0) expect(words[i].startSec).toBe(words[i - 1].endSec);
+    }
+  });
+
+  it("gives longer words a longer share of the segment", () => {
+    const { words } = convertOpenAiDiarizedJson(REAL_SHAPE, "openai-gpt-4o-transcribe-diarize");
+    const duration = (w: { startSec: number; endSec: number }) => w.endSec - w.startSec;
+
+    expect(duration(words[0])).toBeGreaterThan(duration(words[2])); // "Relentlessly." vs "the"
+  });
+
+  it("carries the segment's speaker onto every word", () => {
+    const { words } = convertOpenAiDiarizedJson(REAL_SHAPE, "openai-gpt-4o-transcribe-diarize");
+    expect(words.every((w) => w.speaker === "A")).toBe(true);
+  });
+
+  it("uses the neutral confidence, since none of this was measured", () => {
+    const { words } = convertOpenAiDiarizedJson(REAL_SHAPE, "openai-gpt-4o-transcribe-diarize");
+    expect(words.every((w) => w.confidence === 0.5)).toBe(true);
+  });
+
+  it("falls back to the request's language hint when the provider reports none", () => {
+    expect(convertOpenAiDiarizedJson(REAL_SHAPE, "p", "en").language).toBe("en");
+    expect(convertOpenAiDiarizedJson(REAL_SHAPE, "p").language).toBe("und");
+  });
+
+  it("skips a segment with no usable text or window instead of inventing one", () => {
+    const payload = {
+      segments: [
+        { speaker: "A", start: 0, end: 1, text: "   " },
+        { speaker: "A", start: 2, end: 2, text: "déjà fini" },
+        { speaker: "B", start: 3, end: 4, text: "gardé" },
+      ],
+    };
+    const { words } = convertOpenAiDiarizedJson(payload, "p");
+    expect(words.map((w) => w.text)).toEqual(["gardé"]);
+  });
+
+  it("names the keys it received when the shape is unusable", () => {
+    expect(() => convertOpenAiDiarizedJson({ text: "x", usage: {} }, "p")).toThrowError(
+      /Clés reçues : text:string, usage:object/
+    );
+  });
+
+  it("flags this provider's word timings as interpolated", () => {
+    expect(hasInterpolatedWordTimings("openai-gpt-4o-transcribe-diarize")).toBe(true);
+    expect(hasInterpolatedWordTimings("assemblyai")).toBe(false);
   });
 });

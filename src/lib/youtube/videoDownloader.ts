@@ -433,7 +433,12 @@ export function createYtDlpDownloader(options: YtDlpDownloaderOptions): VideoDow
           );
         }
 
-        const stats = await stat(storedPath);
+        // turbopackIgnore: this path is a file yt-dlp just wrote at
+        // runtime, under the downloads dir — never a project source. Left
+        // untagged, the bundler cannot know that and traces the whole
+        // project into the server output (it reaches this module through
+        // instrumentation.ts → the in-server job worker).
+        const stats = await stat(/* turbopackIgnore: true */ storedPath);
         if (stats.size > limits.maxBytes) {
           throw new VideoDownloadError(
             "too-large",

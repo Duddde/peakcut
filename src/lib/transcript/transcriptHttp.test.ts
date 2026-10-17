@@ -125,3 +125,41 @@ describe("clamp01", () => {
     expect(clamp01(2)).toBe(1);
   });
 });
+
+describe("fetchWithTimeout — lisibilité des pannes réseau", () => {
+  /**
+   * Three different failures used to be recorded identically as
+   * "fetch failed", which is what made a 5-minute undici headers timeout
+   * take three attempts and a stopwatch to identify.
+   */
+  it("folds Node's hidden cause into the message", async () => {
+    const underlying = Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: underlying });
+    }) as unknown as typeof fetch;
+
+    await expect(fetchWithTimeout(fetchImpl, "openai", "https://x.test", {}, 1000)).rejects.toThrowError(
+      /UND_ERR_HEADERS_TIMEOUT — Headers Timeout Error/
+    );
+  });
+
+  it("names the provider that could not be reached", async () => {
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: new Error("getaddrinfo ENOTFOUND") });
+    }) as unknown as typeof fetch;
+
+    await expect(fetchWithTimeout(fetchImpl, "assemblyai", "https://x.test", {}, 1000)).rejects.toThrowError(
+      /fournisseur "assemblyai"/
+    );
+  });
+
+  it("leaves an error that already says something useful alone", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("socket hang up");
+    }) as unknown as typeof fetch;
+
+    await expect(fetchWithTimeout(fetchImpl, "openai", "https://x.test", {}, 1000)).rejects.toThrowError(
+      /^socket hang up$/
+    );
+  });
+});

@@ -248,3 +248,74 @@ describe("SqliteJobRepository", () => {
     expect(list.map((j) => j.id)).toEqual(["job-2", "job-1"]);
   });
 });
+
+describe("createJob — idempotence et relance après échec", () => {
+  /**
+   * The key exists so a double click does not run the same work twice.
+   * It must not also mean "this has failed once, so it can never be
+   * attempted again": the user saw the dead job's old error replayed at
+   * every click, with no way out even after the cause was fixed.
+   */
+  function enqueue(repo: SqliteJobRepository, id: string, now: string) {
+    return repo.createJob({
+      id,
+      projectId: null,
+      kind: "transcription",
+      payload: { providerId: "openai-gpt-4o-transcribe-diarize" },
+      idempotencyKey: "transcription:projet:source:openai",
+      now,
+    });
+  }
+
+  it("returns the existing job while it is still queued", () => {
+    const { jobs: repo } = setup();
+    const first = enqueue(repo, "job-1", "2026-01-01T00:00:00.000Z");
+    const second = enqueue(repo, "job-2", "2026-01-01T00:00:01.000Z");
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.job.id).toBe("job-1");
+  });
+
+  it("returns the existing job once it has succeeded, instead of redoing the work", () => {
+    const { jobs: repo } = setup();
+    enqueue(repo, "job-1", "2026-01-01T00:00:00.000Z");
+    repo.claimNextJob();
+    repo.succeedJob("job-1", { ok: true }, "2026-01-01T00:00:02.000Z");
+
+    const again = enqueue(repo, "job-2", "2026-01-01T00:00:03.000Z");
+    expect(again.created).toBe(false);
+    expect(again.job.id).toBe("job-1");
+    expect(again.job.status).toBe("succeeded");
+  });
+
+  it("creates a fresh job after a terminal failure, so a fixed cause can be retried", () => {
+    const { jobs: repo } = setup();
+    enqueue(repo, "job-1", "2026-01-01T00:00:00.000Z");
+    repo.claimNextJob();
+    repo.failJob("job-1", "TranscriptHttpError", "chunking_strategy is required", "2026-01-01T00:00:02.000Z");
+    repo.claimNextJob();
+    repo.failJob("job-1", "TranscriptHttpError", "chunking_strategy is required", "2026-01-01T00:00:03.000Z");
+    repo.claimNextJob();
+    repo.failJob("job-1", "TranscriptHttpError", "chunking_strategy is required", "2026-01-01T00:00:04.000Z");
+    expect(repo.getJobById("job-1")?.status).toBe("failed");
+
+    const retry = enqueue(repo, "job-2", "2026-01-01T00:00:05.000Z");
+
+    expect(retry.created).toBe(true);
+    expect(retry.job.id).toBe("job-2");
+    expect(retry.job.status).toBe("queued");
+    // The failed attempt is kept for history, but no longer owns the key.
+    expect(repo.getJobById("job-1")?.status).toBe("failed");
+  });
+
+  it("creates a fresh job after a cancellation too", () => {
+    const { jobs: repo } = setup();
+    enqueue(repo, "job-1", "2026-01-01T00:00:00.000Z");
+    repo.cancelJob("job-1", "2026-01-01T00:00:01.000Z");
+
+    const retry = enqueue(repo, "job-2", "2026-01-01T00:00:02.000Z");
+    expect(retry.created).toBe(true);
+    expect(retry.job.status).toBe("queued");
+  });
+});

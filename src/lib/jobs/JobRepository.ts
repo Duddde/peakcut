@@ -67,6 +67,13 @@ function rowToJob(row: JobRow): Job {
 export class SqliteJobRepository implements JobRepository {
   constructor(private readonly db: DatabaseSync) {}
 
+  /**
+   * Statuses after which the same idempotency key may be claimed by a new
+   * job. A queued/running one is still the answer to the request, and a
+   * succeeded one already is the answer; only a dead end is retried.
+   */
+  private static readonly RETRYABLE_AFTER = ["failed", "cancelled"];
+
   createJob(input: NewJobInput): CreateJobResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -74,9 +81,26 @@ export class SqliteJobRepository implements JobRepository {
         const existingRow = this.db
           .prepare("SELECT * FROM jobs WHERE idempotency_key = ?")
           .get(input.idempotencyKey) as JobRow | undefined;
-        if (existingRow) {
+
+        if (existingRow && !SqliteJobRepository.RETRYABLE_AFTER.includes(existingRow.status)) {
           this.db.exec("COMMIT");
           return { job: rowToJob(existingRow), created: false };
+        }
+
+        if (existingRow) {
+          /**
+           * The previous attempt ended badly (failed, or cancelled). The
+           * key must not turn that into a permanent verdict: without this,
+           * asking again returned the old dead job forever — the caller
+           * saw its stale error message replayed, with no way to retry
+           * once whatever broke had been fixed.
+           *
+           * The old row is kept for history, minus the key, so the new
+           * attempt can take it (idempotency_key is UNIQUE).
+           */
+          this.db
+            .prepare("UPDATE jobs SET idempotency_key = NULL, updated_at = ? WHERE id = ?")
+            .run(input.now, existingRow.id);
         }
       }
 
