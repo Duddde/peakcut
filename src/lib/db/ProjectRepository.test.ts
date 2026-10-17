@@ -4,9 +4,11 @@ import { DatabaseSync } from "node:sqlite";
 import { runMigrations } from "@/lib/db/migrations";
 import { SqliteUserRepository } from "@/lib/auth/UserRepository";
 import { SqliteProjectRepository } from "./ProjectRepository";
+import { SqliteJobRepository } from "@/lib/jobs/JobRepository";
 import { createInitialWorkflow } from "@/lib/workflow/workflow";
 import { scoreSegment } from "@/lib/scoring/scoreSegment";
 import type { Project, Segment } from "@/lib/domain/types";
+import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 
 function setup() {
   const db = new DatabaseSync(":memory:");
@@ -40,6 +42,7 @@ function buildSegment(id: string, projectId: string): Segment {
         rect: { x: 0.05, y: 0.78, width: 0.9, height: 0.15 },
       },
     ],
+    renderPlan: null,
     variants: [
       { id: `${id}-v1`, label: "Vertical", aspectRatio: "9:16", crop: { x: 0.34, y: 0, width: 0.32, height: 1 } },
     ],
@@ -164,5 +167,67 @@ describe("SqliteProjectRepository", () => {
     projects.createProject(owner.id, project);
     const loaded = projects.getProjectById("p1")!;
     expect(loaded.segments.map((s) => s.id)).toEqual(project.segments.map((s) => s.id));
+  });
+});
+
+describe("updateProject vs. the job queue", () => {
+  /**
+   * jobs.project_id is ON DELETE CASCADE, so an update implemented as
+   * "delete the project row, insert it again" silently takes the
+   * project's whole job queue with it — including the job whose own
+   * handler is doing the updating, which then polls as 404 "Job
+   * introuvable." for the client watching it.
+   */
+  it("keeps the project's jobs when the project is updated", () => {
+    const { db, projects, owner } = setup();
+    const project = buildProject("projet-jobs");
+    projects.createProject(owner.id, project);
+    const jobs = new SqliteJobRepository(db);
+    const job = jobs.createJob({
+      id: "job-survivant",
+      projectId: project.id,
+      kind: "download",
+      payload: { url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+      now: "2026-01-01T00:00:00.000Z",
+    });
+
+    projects.updateProject(project.id, { ...project, title: "Titre modifié" });
+
+    expect(jobs.getJobById(job.job.id)).not.toBeNull();
+    expect(jobs.getJobOwnerId(job.job.id)).toBe(owner.id);
+    expect(projects.getProjectById(project.id)?.title).toBe("Titre modifié");
+  });
+});
+
+describe("SqliteProjectRepository — plan d'effets du segment", () => {
+  const plan = buildRenderPlan("hook-emphasis", { segmentId: "p1-seg-1", segmentDurationSec: 60 });
+
+  function withPlan(renderPlan: Segment["renderPlan"]): Project {
+    const project = buildProject("p1");
+    return { ...project, segments: project.segments.map((s) => ({ ...s, renderPlan })) };
+  }
+
+  it("round-trips a segment's render plan", () => {
+    const { projects, owner } = setup();
+    projects.createProject(owner.id, withPlan(plan));
+
+    expect(projects.getProjectById("p1")?.segments[0].renderPlan).toEqual(plan);
+  });
+
+  it("keeps a segment with no plan at null rather than inventing one", () => {
+    const { projects, owner } = setup();
+    projects.createProject(owner.id, withPlan(null));
+
+    expect(projects.getProjectById("p1")?.segments[0].renderPlan).toBeNull();
+  });
+
+  it("persists a plan the user changed, replacing the previous one", () => {
+    const { projects, owner } = setup();
+    projects.createProject(owner.id, withPlan(plan));
+
+    const edited = buildRenderPlan("clean-captions", { segmentId: "p1-seg-1", segmentDurationSec: 60 });
+    projects.updateProject("p1", withPlan(edited));
+
+    expect(projects.getProjectById("p1")?.segments[0].renderPlan?.templateId).toBe("clean-captions");
   });
 });

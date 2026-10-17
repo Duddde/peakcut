@@ -228,6 +228,7 @@ describe("POST /api/ingest-media", () => {
           score: null,
           safeZones: [],
           variants: [],
+      renderPlan: null,
         },
       ];
       repo.createProject(user.id, project);

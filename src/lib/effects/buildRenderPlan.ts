@@ -6,7 +6,7 @@ import type {
   SubtitleStyle,
   ZoomKeyframe,
 } from "./types";
-import { ATTACK_SEC_MIN, RELEASE_SEC_MIN, ZOOM_SCALE_MAX, ZOOM_SCALE_MIN } from "./types";
+import { ATTACK_SEC_MIN, MIN_CUT_DURATION_SEC, RELEASE_SEC_MIN, ZOOM_SCALE_MAX, ZOOM_SCALE_MIN } from "./types";
 
 export interface BuildRenderPlanContext {
   segmentId: string;
@@ -15,14 +15,20 @@ export interface BuildRenderPlanContext {
   speakerChangeTimesSec?: number[];
 }
 
-const ZOOM_LIMITATION =
-  "Les images clés de zoom sont validées et prévisualisables, mais l'export actuel applique un cadrage statique borné plutôt qu'une animation de zoom image par image.";
 const DUCKING_LIMITATION =
   "Le ducking audio est déclaré et validé dans le plan, mais n'est pas encore appliqué au mixage audio par l'export dans ce MVP.";
 const CUTS_LIMITATION =
   "Aucune détection automatique de coupes n'est effectuée : le plan couvre toujours l'intégralité du segment.";
 
-const COMMON_LIMITATIONS = [ZOOM_LIMITATION, DUCKING_LIMITATION, CUTS_LIMITATION];
+/**
+ * What a plan still does not do. The zoom used to be listed here; it is
+ * not any more, because exportSegment compiles these keyframes into a
+ * real animated ffmpeg crop. When it cannot (no base crop, a plan that
+ * fails validation), it says so itself, per export, in
+ * `renderLimitations` — a limitation that depends on the call does not
+ * belong in a constant.
+ */
+export const COMMON_LIMITATIONS = [DUCKING_LIMITATION, CUTS_LIMITATION];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -44,7 +50,7 @@ function buildSubtlePunch(durationSec: number): TemplateOutput {
     durationSec > 0
       ? [
           { tSec: 0, scale: ZOOM_SCALE_MIN },
-          { tSec: durationSec / 2, scale: clamp(1.06, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX) },
+          { tSec: durationSec / 2, scale: clamp(1.12, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX) },
           { tSec: durationSec, scale: ZOOM_SCALE_MIN },
         ]
       : [{ tSec: 0, scale: ZOOM_SCALE_MIN }];
@@ -67,7 +73,7 @@ function buildSpeakerFocus(durationSec: number, speakerChangeTimesSec?: number[]
   if (durationSec <= 0) {
     zoomKeyframes = [{ tSec: 0, scale: ZOOM_SCALE_MIN }];
   } else if (speakerChangeTimesSec && speakerChangeTimesSec.length > 0) {
-    const punchScale = clamp(1.1, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX);
+    const punchScale = clamp(1.2, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX);
     const changeKeyframes = speakerChangeTimesSec.map((t) => ({
       tSec: clamp(t, 0, durationSec),
       scale: punchScale,
@@ -76,7 +82,7 @@ function buildSpeakerFocus(durationSec: number, speakerChangeTimesSec?: number[]
       (a, b) => a.tSec - b.tSec
     );
   } else {
-    zoomKeyframes = [{ tSec: 0, scale: clamp(1.08, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX) }];
+    zoomKeyframes = [{ tSec: 0, scale: clamp(1.15, ZOOM_SCALE_MIN, ZOOM_SCALE_MAX) }];
   }
 
   return {
@@ -156,11 +162,20 @@ export function buildRenderPlan(templateId: EffectTemplateId, context: BuildRend
       throw new Error(`Modèle d'effet inconnu : "${templateId}".`);
   }
 
+  /**
+   * A clip shorter than the shortest legal cut cannot carry an edit: a
+   * zero-length cut, or one below MIN_CUT_DURATION_SEC, is exactly what
+   * validateRenderPlan rejects. Rather than emit a plan that fails its
+   * own validator — and have the export silently fall back — the plan
+   * degrades to "no cut, no zoom", which is valid and true.
+   */
+  const tooShortToEdit = durationSec < MIN_CUT_DURATION_SEC;
+
   return {
     templateId,
     intensity: output.intensity,
-    cuts: [{ startSec: 0, endSec: durationSec }],
-    zoomKeyframes: output.zoomKeyframes,
+    cuts: tooShortToEdit ? [] : [{ startSec: 0, endSec: durationSec }],
+    zoomKeyframes: tooShortToEdit ? [{ tSec: 0, scale: ZOOM_SCALE_MIN }] : output.zoomKeyframes,
     subtitleStyle: output.subtitleStyle,
     safeZones: buildDefaultSafeZones(context.segmentId),
     audioDucking: output.audioDucking,

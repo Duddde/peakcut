@@ -14,6 +14,9 @@ import {
   tooManyRequests,
   type PublicTrialRateLimiters,
 } from "@/lib/publicTrial/quotas";
+import { drawtextFontFragment, renderPreviewSegment } from "@/lib/ffmpeg/renderPreviewSegment";
+import type { NormalizedRect, Segment, TranscriptWord } from "@/lib/domain/types";
+import type { RenderPlan } from "@/lib/effects/types";
 
 const execFileAsync = promisify(execFile);
 const MAX_DURATION_SEC = 15;
@@ -59,11 +62,30 @@ async function probeDuration(sourcePath: string): Promise<number> {
  * project route). The preview window is the segment's start plus at most
  * MAX_DURATION_SEC. A trial is additionally capped per window.
  */
+interface ProjectPreview {
+  sourcePath: string;
+  startSec: number;
+  endSec: number;
+  /** The variant's framing — what makes the preview vertical and on the speaker. */
+  crop?: NormalizedRect;
+  words: TranscriptWord[];
+  renderPlan?: RenderPlan;
+}
+
+/** The variant the caller asked for, else the segment's first. */
+function pickVariant(segment: Segment, variantId: unknown) {
+  if (typeof variantId === "string") {
+    const match = segment.variants.find((v) => v.id === variantId);
+    if (match) return match;
+  }
+  return segment.variants[0];
+}
+
 async function resolveProjectPreview(
   request: NextRequest,
   body: Record<string, unknown>,
   options: PreviewHandlerOptions
-): Promise<{ sourcePath: string; startSec: number; endSec: number } | NextResponse> {
+): Promise<ProjectPreview | NextResponse> {
   const depsOrError = resolveRouteDeps(options.appDeps);
   if (depsOrError instanceof NextResponse) return depsOrError;
   const deps = depsOrError;
@@ -101,6 +123,9 @@ async function resolveProjectPreview(
     sourcePath,
     startSec: segment.startSec,
     endSec: Math.min(segment.endSec, segment.startSec + MAX_DURATION_SEC),
+    crop: pickVariant(segment, body.variantId)?.crop,
+    words: segment.words,
+    renderPlan: segment.renderPlan ?? undefined,
   };
 }
 
@@ -126,11 +151,13 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
     let sourcePath: string | null;
     let startSec: number | null;
     let endSec: number | null;
+    let projectPreview: ProjectPreview | null = null;
     if (typeof body.projectId === "string") {
       // Project mode: the source and bounds come from the caller's own
       // project in the DB, never from the request body.
       const resolved = await resolveProjectPreview(request, body, options);
       if (resolved instanceof NextResponse) return resolved;
+      projectPreview = resolved;
       ({ sourcePath, startSec, endSec } = resolved);
     } else {
       sourcePath = safePath(body.sourcePath, options.uploadsBaseDir);
@@ -155,10 +182,40 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
       await mkdir(options.previewsBaseDir, { recursive: true });
       const previewId = randomUUID();
       const outputPath = path.join(options.previewsBaseDir, `${previewId}.mp4`);
-      await execFileAsync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(startSec), "-i", sourcePath, "-t", String(endSec - startSec), "-vf", "scale=540:-2:force_original_aspect_ratio=decrease,pad=540:960:(ow-iw)/2:(oh-ih)/2:black,drawtext=text='PeakCut Apercu':x=(w-text_w)/2:y=h-70:fontsize=28:fontcolor=white@0.82:box=1:boxcolor=black@0.45:boxborderw=8", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", outputPath], { timeout: 90_000 });
+      let assPath: string | null = null;
+
+      if (projectPreview) {
+        // A project preview has to show the edit, not the raw source: the
+        // variant's framing, the plan's zoom and the burned-in captions —
+        // the same pipeline as the export, at preview resolution and
+        // watermarked. Previewing a letterboxed crop of the original made
+        // every framing and effect decision invisible until download.
+        ({ assPath } = await renderPreviewSegment({
+          inputMediaPath: sourcePath,
+          startSec,
+          endSec,
+          outputPath,
+          crop: projectPreview.crop,
+          words: projectPreview.words,
+          renderPlan: projectPreview.renderPlan,
+        }));
+      } else {
+        // drawtext needs a real font file: left to fontconfig, it segfaults
+        // on an ffmpeg build without a fontconfig configuration (Windows).
+        const videoFilter =
+          "scale=540:-2:force_original_aspect_ratio=decrease," +
+          "pad=540:960:(ow-iw)/2:(oh-ih)/2:black," +
+          `drawtext=${drawtextFontFragment()}text='PeakCut Apercu':x=(w-text_w)/2:y=h-70:` +
+          "fontsize=28:fontcolor=white@0.82:box=1:boxcolor=black@0.45:boxborderw=8";
+        await execFileAsync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(startSec), "-i", sourcePath, "-t", String(endSec - startSec), "-vf", videoFilter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", outputPath], { timeout: 90_000 });
+      }
+
       if ((await stat(outputPath)).size <= 0) throw new Error("empty output");
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-      setTimeout(() => void unlink(outputPath).catch(() => undefined), 15 * 60 * 1000).unref();
+      setTimeout(() => {
+        void unlink(outputPath).catch(() => undefined);
+        if (assPath) void unlink(assPath).catch(() => undefined);
+      }, 15 * 60 * 1000).unref();
       return NextResponse.json({ ok: true, previewId, url: `/api/preview-segment/${previewId}`, expiresAt, durationSec: endSec - startSec, watermark: true }, { status: 201 });
     } catch {
       return NextResponse.json({ ok: false, error: "Aperçu indisponible pour ce média." }, { status: 422 });

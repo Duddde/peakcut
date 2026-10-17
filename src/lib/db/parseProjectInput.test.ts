@@ -8,6 +8,7 @@ import {
 } from "./parseProjectInput";
 import { createInitialWorkflow } from "@/lib/workflow/workflow";
 import type { Project } from "@/lib/domain/types";
+import { COMMON_LIMITATIONS, buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 
 function baseProject(): Project {
   const now = "2026-01-01T00:00:00.000Z";
@@ -215,5 +216,71 @@ describe("parseProjectResponse", () => {
 
   it("throws for a non-object payload", () => {
     expect(() => parseProjectResponse(null)).toThrow(ProjectInputParseError);
+  });
+});
+
+describe("parseSegmentInput — plan d'effets", () => {
+  const validPlan = buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 60 });
+
+  function segmentWith(renderPlan: unknown) {
+    return {
+      id: "seg-1",
+      projectId: "p1",
+      title: "Clip",
+      startSec: 0,
+      endSec: 60,
+      words: [{ text: "Bonjour", startSec: 0, endSec: 0.4, speaker: "A", confidence: 0.9 }],
+      score: null,
+      safeZones: [],
+      variants: [],
+      renderPlan,
+    };
+  }
+
+  it("accepts a plan the user edited and keeps its values", () => {
+    const parsed = parseSegmentInput(segmentWith({ ...validPlan, templateId: "clean-captions" }));
+    expect(parsed.renderPlan?.templateId).toBe("clean-captions");
+    expect(parsed.renderPlan?.zoomKeyframes).toEqual(validPlan.zoomKeyframes);
+  });
+
+  it("treats a missing plan as none, not as an error", () => {
+    expect(parseSegmentInput(segmentWith(null)).renderPlan).toBeNull();
+    const { renderPlan: _omitted, ...withoutKey } = segmentWith(null);
+    expect(parseSegmentInput(withoutKey).renderPlan).toBeNull();
+  });
+
+  /**
+   * The plan is compiled into a real ffmpeg filtergraph, so a value out
+   * of range has to be refused at the boundary — not clamped quietly,
+   * and not discovered at render time.
+   */
+  it("refuses a plan whose zoom exceeds the declared bounds", () => {
+    expect(() =>
+      parseSegmentInput(segmentWith({ ...validPlan, zoomKeyframes: [{ tSec: 0, scale: 9 }] }))
+    ).toThrow(ProjectInputParseError);
+  });
+
+  it("refuses an unknown template id", () => {
+    expect(() => parseSegmentInput(segmentWith({ ...validPlan, templateId: "cinematic-ai" }))).toThrow(
+      ProjectInputParseError
+    );
+  });
+
+  it("refuses a structurally broken plan", () => {
+    for (const broken of [
+      { ...validPlan, subtitleStyle: undefined },
+      { ...validPlan, intensity: "fort" },
+      { ...validPlan, zoomKeyframes: "beaucoup" },
+      { ...validPlan, subtitleStyle: { ...validPlan.subtitleStyle, emphasizeKeywords: "oui" } },
+    ]) {
+      expect(() => parseSegmentInput(segmentWith(broken))).toThrow(ProjectInputParseError);
+    }
+  });
+
+  it("never takes the limitations from the client: what the export cannot do is the server's word", () => {
+    const parsed = parseSegmentInput(
+      segmentWith({ ...validPlan, limitations: ["PeakCut fait absolument tout"] })
+    );
+    expect(parsed.renderPlan?.limitations).toEqual(COMMON_LIMITATIONS);
   });
 });

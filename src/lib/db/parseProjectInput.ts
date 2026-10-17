@@ -1,4 +1,7 @@
 import { parseWorkflowState } from "@/lib/workflow/parseWorkflowState";
+import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
+import { COMMON_LIMITATIONS } from "@/lib/effects/buildRenderPlan";
+import { EFFECT_TEMPLATE_IDS, type EffectTemplateId, type RenderPlan } from "@/lib/effects/types";
 import type {
   Project,
   ProjectStatus,
@@ -122,6 +125,94 @@ function parseScore(raw: unknown, field: string): Score | null {
   };
 }
 
+function bool(raw: unknown, field: string): boolean {
+  if (typeof raw !== "boolean") {
+    throw new ProjectInputParseError(`${field} doit être un booléen.`);
+  }
+  return raw;
+}
+
+/**
+ * A segment's editing decisions, as edited by the user and sent back.
+ *
+ * Parsed strictly and then re-checked against the same bounds
+ * buildRenderPlan respects (validateRenderPlan): the plan is compiled
+ * into a real ffmpeg filtergraph, so an out-of-range value arriving over
+ * the network is refused here rather than being clamped silently or
+ * discovered at render time.
+ *
+ * `limitations` is not read from the client: what an export does not do
+ * is the server's statement about itself, never something a caller can
+ * edit away. The server's own list is substituted instead.
+ */
+function parseRenderPlanInput(raw: unknown, field: string): RenderPlan | null {
+  if (raw === null || raw === undefined) return null;
+  const p = obj(raw, field);
+
+  const templateId = str(p.templateId, `${field}.templateId`);
+  if (!EFFECT_TEMPLATE_IDS.includes(templateId as EffectTemplateId)) {
+    throw new ProjectInputParseError(
+      `${field}.templateId doit être l'un de : ${EFFECT_TEMPLATE_IDS.join(", ")}.`
+    );
+  }
+
+  const subtitleStyle = obj(p.subtitleStyle, `${field}.subtitleStyle`);
+  const audioDucking = obj(p.audioDucking, `${field}.audioDucking`);
+
+  const plan: RenderPlan = {
+    templateId: templateId as EffectTemplateId,
+    intensity: num(p.intensity, `${field}.intensity`),
+    cuts: arr(p.cuts, `${field}.cuts`).map((rawCut, i) => {
+      const c = obj(rawCut, `${field}.cuts[${i}]`);
+      return {
+        startSec: num(c.startSec, `${field}.cuts[${i}].startSec`),
+        endSec: num(c.endSec, `${field}.cuts[${i}].endSec`),
+      };
+    }),
+    zoomKeyframes: arr(p.zoomKeyframes, `${field}.zoomKeyframes`).map((rawKf, i) => {
+      const k = obj(rawKf, `${field}.zoomKeyframes[${i}]`);
+      return {
+        tSec: num(k.tSec, `${field}.zoomKeyframes[${i}].tSec`),
+        scale: num(k.scale, `${field}.zoomKeyframes[${i}].scale`),
+      };
+    }),
+    subtitleStyle: {
+      fontSizeScale: num(subtitleStyle.fontSizeScale, `${field}.subtitleStyle.fontSizeScale`),
+      primaryColorHex: str(subtitleStyle.primaryColorHex, `${field}.subtitleStyle.primaryColorHex`),
+      marginVerticalScale: num(subtitleStyle.marginVerticalScale, `${field}.subtitleStyle.marginVerticalScale`),
+      emphasizeKeywords: bool(subtitleStyle.emphasizeKeywords, `${field}.subtitleStyle.emphasizeKeywords`),
+    },
+    safeZones: arr(p.safeZones, `${field}.safeZones`).map((rawZone, i) => {
+      const z = obj(rawZone, `${field}.safeZones[${i}]`);
+      const rect = obj(z.rect, `${field}.safeZones[${i}].rect`);
+      return {
+        id: str(z.id, `${field}.safeZones[${i}].id`),
+        purpose: str(z.purpose, `${field}.safeZones[${i}].purpose`) as Segment["safeZones"][number]["purpose"],
+        label: str(z.label, `${field}.safeZones[${i}].label`),
+        rect: {
+          x: num(rect.x, `${field}.safeZones[${i}].rect.x`),
+          y: num(rect.y, `${field}.safeZones[${i}].rect.y`),
+          width: num(rect.width, `${field}.safeZones[${i}].rect.width`),
+          height: num(rect.height, `${field}.safeZones[${i}].rect.height`),
+        },
+      };
+    }),
+    audioDucking: {
+      enabled: bool(audioDucking.enabled, `${field}.audioDucking.enabled`),
+      duckDb: num(audioDucking.duckDb, `${field}.audioDucking.duckDb`),
+      attackSec: num(audioDucking.attackSec, `${field}.audioDucking.attackSec`),
+      releaseSec: num(audioDucking.releaseSec, `${field}.audioDucking.releaseSec`),
+    },
+    limitations: [...COMMON_LIMITATIONS],
+  };
+
+  const check = validateRenderPlan(plan);
+  if (!check.ok) {
+    throw new ProjectInputParseError(`${field} : ${check.errors.join(" ")}`);
+  }
+  return plan;
+}
+
 export function parseSegmentInput(raw: unknown): Segment {
   const s = obj(raw, "segment");
   const words = arr(s.words, "segment.words").map((w, i) => parseWord(w, `segment.words[${i}]`));
@@ -166,6 +257,7 @@ export function parseSegmentInput(raw: unknown): Segment {
     score: parseScore(s.score ?? null, "segment.score"),
     safeZones,
     variants,
+    renderPlan: parseRenderPlanInput(s.renderPlan ?? null, "segment.renderPlan"),
   };
 }
 

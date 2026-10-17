@@ -128,6 +128,7 @@ export function parseAnalyzeResponse(payload: unknown): ParsedRankedSegment[] {
       words,
       safeZones,
       variants,
+      renderPlan: null,
       score:
         s.score_breakdown && typeof s.score === "number" && typeof s.confidence === "number"
           ? {

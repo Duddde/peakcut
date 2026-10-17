@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compileZoomFilter } from "./compileZoomFilter";
 import type { NormalizedRect } from "@/lib/domain/types";
-import type { ZoomKeyframe } from "./types";
+import { ZOOM_SCALE_MAX, type ZoomKeyframe } from "./types";
 
 const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
 const VERTICAL_CROP: NormalizedRect = { x: 0.3418, y: 0, width: 0.3164, height: 1 };
@@ -52,16 +52,16 @@ describe("compileZoomFilter", () => {
     expect(result.filterFragment).toMatch(/y='[^']+'/);
   });
 
-  it("clamps the zoom expression to [1, 1.15] regardless of input scale via clip()", () => {
+  it("clamps the zoom expression to the declared bounds regardless of input scale via clip()", () => {
     const result = compileZoomFilter({
       baseCrop: VERTICAL_CROP,
       zoomKeyframes: [
         { tSec: 0, scale: 1 },
-        { tSec: 5, scale: 1.15 },
+        { tSec: 5, scale: ZOOM_SCALE_MAX },
       ],
     });
     expect(result.filterFragment).toContain("clip(");
-    expect(result.filterFragment).toContain("1.15");
+    expect(result.filterFragment).toContain(ZOOM_SCALE_MAX.toFixed(6));
   });
 
   it("rejects an out-of-bounds scale rather than compiling it verbatim", () => {

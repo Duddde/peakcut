@@ -70,6 +70,7 @@ interface SegmentRow {
   score_json: string | null;
   safe_zones_json: string;
   variants_json: string;
+  render_plan_json: string | null;
 }
 
 /**
@@ -102,8 +103,8 @@ export class SqliteProjectRepository implements ProjectRepository {
         throw new Error(`Projet introuvable : "${id}".`);
       }
       this.deleteNestedRows(id);
-      this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
-      this.insertProject(ownerRow.owner_id, project);
+      this.updateProjectRow(project);
+      this.insertNestedRows(project);
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -191,6 +192,7 @@ export class SqliteProjectRepository implements ProjectRepository {
       score: row.score_json ? JSON.parse(row.score_json) : null,
       safeZones: JSON.parse(row.safe_zones_json),
       variants: JSON.parse(row.variants_json),
+      renderPlan: row.render_plan_json ? JSON.parse(row.render_plan_json) : null,
     }));
 
     const timeline: Timeline | null = projectRow.timeline_json ? JSON.parse(projectRow.timeline_json) : null;
@@ -225,6 +227,34 @@ export class SqliteProjectRepository implements ProjectRepository {
         project.updatedAt
       );
 
+    this.insertNestedRows(project);
+  }
+
+  /**
+   * The project's own columns, left in place rather than re-inserted: the
+   * `projects` row must survive an update, because `jobs.project_id` (and
+   * every other child table) references it ON DELETE CASCADE. Deleting it
+   * here would wipe the project's job queue — including, when the update
+   * comes from a job handler, the very job being run.
+   */
+  private updateProjectRow(project: Project): void {
+    this.db
+      .prepare(
+        `UPDATE projects
+         SET title = ?, status = ?, timeline_json = ?, created_at = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        project.title,
+        project.status,
+        project.timeline ? JSON.stringify(project.timeline) : null,
+        project.createdAt,
+        project.updatedAt,
+        project.id
+      );
+  }
+
+  private insertNestedRows(project: Project): void {
     this.db
       .prepare(
         `INSERT INTO sources (project_id, id, type, title, youtube_url, local_file_path, duration_sec, origin_timestamp, confidence)
@@ -263,8 +293,8 @@ export class SqliteProjectRepository implements ProjectRepository {
       );
 
     const insertSegment = this.db.prepare(
-      `INSERT INTO segments (id, project_id, position, title, start_sec, end_sec, words_json, score_json, safe_zones_json, variants_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO segments (id, project_id, position, title, start_sec, end_sec, words_json, score_json, safe_zones_json, variants_json, render_plan_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     project.segments.forEach((segment, index) => {
       insertSegment.run(
@@ -277,7 +307,8 @@ export class SqliteProjectRepository implements ProjectRepository {
         JSON.stringify(segment.words),
         segment.score ? JSON.stringify(segment.score) : null,
         JSON.stringify(segment.safeZones),
-        JSON.stringify(segment.variants)
+        JSON.stringify(segment.variants),
+        segment.renderPlan ? JSON.stringify(segment.renderPlan) : null
       );
     });
   }

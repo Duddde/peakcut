@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildRenderPlan } from "./buildRenderPlan";
+import { validateRenderPlan } from "./validateRenderPlan";
 import {
   EFFECT_TEMPLATE_IDS,
   ZOOM_SCALE_MIN,
@@ -8,6 +9,7 @@ import {
   FONT_SIZE_SCALE_MAX,
   MARGIN_SCALE_MIN,
   MARGIN_SCALE_MAX,
+  MIN_CUT_DURATION_SEC,
   DUCK_DB_MIN,
   DUCK_DB_MAX,
   ATTACK_SEC_MIN,
@@ -59,9 +61,18 @@ describe("buildRenderPlan", () => {
     expect(plan.cuts).toEqual([{ startSec: 0, endSec: BASE_CONTEXT.segmentDurationSec }]);
   });
 
-  it("documents in limitations that zoom keyframes are not yet frame-accurately rendered", () => {
+  /**
+   * The zoom used to be listed as not-yet-applied. exportSegment now
+   * compiles these keyframes into a real animated crop, so claiming
+   * otherwise would understate what the export does — and a limitation
+   * that depends on the call (no base crop, invalid plan) is reported by
+   * the export itself, per render.
+   */
+  it("no longer claims the zoom is unapplied, but still declares what is", () => {
     const plan = buildRenderPlan("hook-emphasis", BASE_CONTEXT);
-    expect(plan.limitations.some((l) => /zoom/i.test(l))).toBe(true);
+    expect(plan.limitations.some((l) => /zoom/i.test(l))).toBe(false);
+    expect(plan.limitations.some((l) => /ducking/i.test(l))).toBe(true);
+    expect(plan.limitations.some((l) => /coupes/i.test(l))).toBe(true);
   });
 
   it("documents in limitations that audio ducking is declared but not applied", () => {
@@ -113,11 +124,23 @@ describe("buildRenderPlan", () => {
     expect(() => buildRenderPlan("does-not-exist", BASE_CONTEXT)).toThrow();
   });
 
-  it("handles a zero-duration segment without producing out-of-range keyframes", () => {
-    const plan = buildRenderPlan("hook-emphasis", { segmentId: "seg-0", segmentDurationSec: 0 });
-    expect(plan.cuts).toEqual([{ startSec: 0, endSec: 0 }]);
-    for (const kf of plan.zoomKeyframes) {
-      expect(kf.tSec).toBe(0);
+  /**
+   * It used to emit a zero-length cut here, which is precisely what
+   * validateRenderPlan rejects — so the plan failed its own validator and
+   * the export fell back to a static crop without anyone saying why.
+   */
+  it("degrades a segment too short to edit into a valid, empty plan", () => {
+    for (const segmentDurationSec of [0, MIN_CUT_DURATION_SEC / 2]) {
+      const plan = buildRenderPlan("hook-emphasis", { segmentId: "seg-0", segmentDurationSec });
+      expect(plan.cuts).toEqual([]);
+      expect(plan.zoomKeyframes).toEqual([{ tSec: 0, scale: 1 }]);
+      expect(validateRenderPlan(plan).ok).toBe(true);
     }
+  });
+
+  it("emits one cut covering the whole clip as soon as it is long enough to edit", () => {
+    const plan = buildRenderPlan("hook-emphasis", { segmentId: "seg-0", segmentDurationSec: 30 });
+    expect(plan.cuts).toEqual([{ startSec: 0, endSec: 30 }]);
+    expect(validateRenderPlan(plan).ok).toBe(true);
   });
 });

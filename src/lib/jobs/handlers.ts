@@ -7,8 +7,10 @@ import { listTranscriptProviders } from "@/lib/transcript/registry";
 import type { TranscriptProvider } from "@/lib/transcript/TranscriptProvider";
 import { scoreSegment } from "@/lib/scoring/scoreSegment";
 import { deriveCategories } from "@/lib/analysis/deriveCategories";
+import { segmentTranscript } from "@/lib/analysis/segmentTranscript";
 import { buildDefaultSafeZones } from "@/lib/domain/defaultSafeZones";
 import { buildDefaultVariants } from "@/lib/domain/defaultVariants";
+import { defaultRenderPlanFor } from "@/lib/effects/defaultRenderPlanFor";
 import { verifyExport } from "@/lib/ffmpeg/verifyExport";
 import { exportSegment } from "@/lib/ffmpeg/exportSegment";
 import { getExportBlockReasons } from "@/lib/workflow/exportGate";
@@ -109,26 +111,30 @@ function findSegmentOrThrow(project: Project, segmentId: string): Segment {
   return segment;
 }
 
-function buildWholeTranscriptSegment(
-  projectId: string,
-  words: Segment["words"],
-  sourceDurationSec: number
-): Segment {
-  const id = `job-analysis-segment-${Date.now()}`;
-  const startSec = 0;
-  const lastWordEnd = words[words.length - 1]?.endSec ?? 0;
-  const endSec = Math.max(lastWordEnd, sourceDurationSec, 0.1);
-  return {
-    id,
+/**
+ * Candidate clips cut from the transcript by segmentTranscript, which
+ * replaced the single whole-transcript segment this used to build. That
+ * old behavior scored a 10-minute recording as one block: a meaningless
+ * number (every factor averaged over the entire video) and nothing an
+ * editor could export as a short.
+ */
+function buildCandidateSegments(projectId: string, words: Segment["words"], nowMs: number): Segment[] {
+  return segmentTranscript(words, {
     projectId,
-    title: "Segment transcrit",
-    startSec,
-    endSec,
-    words,
-    score: null,
-    safeZones: buildDefaultSafeZones(id),
-    variants: buildDefaultVariants(id),
-  };
+    idFor: (index) => `job-analysis-segment-${nowMs}-${index}`,
+    buildSafeZones: buildDefaultSafeZones,
+    buildVariants: buildDefaultVariants,
+    // A candidate arrives already edited: zoom keyframes and a caption
+    // style, chosen from the clip's own shape. Stored on the segment, so
+    // the user's later changes to it are what gets exported.
+    buildRenderPlan: (segmentId, candidate) =>
+      defaultRenderPlanFor({
+        segmentId,
+        startSec: candidate.startSec,
+        endSec: candidate.endSec,
+        words: candidate.words,
+      }),
+  });
 }
 
 /**
@@ -225,11 +231,13 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
    * Rescoring is always applied to each existing segment's own (possibly
    * hand-edited) words/boundaries — never re-sliced from the full
    * transcript — so a prior manual edit in the transcript/segment editor is
-   * never silently discarded by running analysis again. The one exception
-   * is a project with a transcript but zero segments yet: there, a single
-   * whole-transcript candidate segment is created as a starting point
-   * (mirroring the client-side buildSegmentFromTranscript helper), since
-   * PeakCut has no multi-candidate segmentation model to fall back on.
+   * never silently discarded by running analysis again.
+   *
+   * A project with a transcript but no segment yet is cut into candidate
+   * clips by segmentTranscript. Re-cutting a project that already has
+   * segments requires `payload.resegment: true`, because it replaces them:
+   * discarding an editor's work is a thing the caller has to ask for in so
+   * many words, never a side effect of pressing "analyse" twice.
    */
   const analysis: JobHandler = async ({ job }) => {
     const project = loadProjectOrThrow(projectRepo, job.projectId);
@@ -239,11 +247,19 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       );
     }
 
+    const payload = job.payload as { resegment?: unknown };
+    const resegment = payload.resegment === true;
+    if (resegment && !project.transcript) {
+      throw new Error(
+        "payload.resegment exige une transcription : lancez d'abord un job de transcription."
+      );
+    }
+
     const baseSegments: Segment[] =
-      project.segments.length > 0
+      project.segments.length > 0 && !resegment
         ? project.segments
         : project.transcript
-          ? [buildWholeTranscriptSegment(project.id, project.transcript.words, project.source.durationSec)]
+          ? buildCandidateSegments(project.id, project.transcript.words, nowMs())
           : [];
 
     const scored = baseSegments.map((segment) => {
@@ -345,6 +361,10 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       outputPath,
       words: segment.words,
       crop: variant?.crop,
+      // The segment's own plan — the template the analysis chose, with
+      // whatever the user changed since. Without this, the export ignored
+      // every edit the studio let them make.
+      renderPlan: segment.renderPlan ?? undefined,
     });
     reportProgress(90);
 

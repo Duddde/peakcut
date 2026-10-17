@@ -19,6 +19,8 @@ import type { TranscriptProvider } from "@/lib/transcript/TranscriptProvider";
 import { VideoDownloadError, type VideoDownloader, type VideoDownloadResult } from "@/lib/youtube/videoDownloader";
 import type { Project, Segment } from "@/lib/domain/types";
 import type { FrameTracker, FrameTrack } from "@/lib/tracking/types";
+import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
+import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
 
 function baseProject(overrides: Partial<Project> = {}): Project {
   const now = "2026-01-01T00:00:00.000Z";
@@ -45,6 +47,27 @@ function baseProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
+/**
+ * `sentenceCount` two-second sentences, each closing on a period so
+ * segmentTranscript has real boundaries to cut on.
+ */
+function longTranscriptWords(sentenceCount: number) {
+  const words = [];
+  for (let s = 0; s < sentenceCount; s++) {
+    for (let w = 0; w < 4; w++) {
+      const startSec = s * 2 + w * 0.5;
+      words.push({
+        text: w === 3 ? `mot${s}.` : `mot${s}x${w}`,
+        startSec,
+        endSec: startSec + 0.5,
+        speaker: "A",
+        confidence: 0.9,
+      });
+    }
+  }
+  return words;
+}
+
 function makeSegment(id: string, startSec: number, endSec: number): Segment {
   const words = [
     { text: "Bonjour", startSec, endSec: startSec + 0.3, speaker: "A", confidence: 0.9 },
@@ -60,6 +83,7 @@ function makeSegment(id: string, startSec: number, endSec: number): Segment {
     score: scoreSegment({ words, startSec, endSec }),
     safeZones: buildDefaultSafeZones(id),
     variants: buildDefaultVariants(id),
+    renderPlan: null,
   };
 }
 
@@ -374,6 +398,123 @@ describe("createDefaultJobHandlers", () => {
     }
   });
 
+  it("analysis cuts several candidate clips from the transcript when there are zero segments yet", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({
+        transcript: { language: "fr", providerId: "mock", words: longTranscriptWords(120) },
+      });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "analysis", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+      const claimed = jobs.claimNextJob()!;
+      const result = (await handlers.analysis({ job: claimed, reportProgress: () => {} })) as {
+        segments: { startSec: number; endSec: number }[];
+      };
+
+      expect(result.segments.length).toBeGreaterThan(1);
+      // None of them spans the whole transcript the way the old single
+      // whole-transcript segment did.
+      const total = 120 * 2;
+      for (const segment of result.segments) {
+        expect(segment.endSec - segment.startSec).toBeLessThan(total);
+      }
+      expect(projects.getProjectById(project.id)?.segments.length).toBe(result.segments.length);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("analysis re-cuts from the transcript only when payload.resegment is set, replacing the existing segments", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({
+        transcript: { language: "fr", providerId: "mock", words: longTranscriptWords(120) },
+        segments: [
+          {
+            id: "hand-edited",
+            projectId: "p1",
+            title: "Retouché à la main",
+            startSec: 0,
+            endSec: 20,
+            words: longTranscriptWords(10),
+            score: null,
+            safeZones: [],
+            variants: [],
+            renderPlan: null,
+          },
+        ],
+      });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir });
+
+      // Without the flag: the hand-edited segment survives, merely rescored.
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "analysis", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+      const rescored = (await handlers.analysis({
+        job: jobs.claimNextJob()!,
+        reportProgress: () => {},
+      })) as { segments: { id: string; title: string }[] };
+      expect(rescored.segments).toHaveLength(1);
+      expect(rescored.segments[0].id).toBe("hand-edited");
+
+      // With it: replaced by freshly cut candidates.
+      jobs.createJob({
+        id: "job-2",
+        projectId: project.id,
+        kind: "analysis",
+        payload: { resegment: true },
+        now: "2026-01-01T00:00:01.000Z",
+      });
+      const recut = (await handlers.analysis({
+        job: jobs.claimNextJob()!,
+        reportProgress: () => {},
+      })) as { segments: { id: string }[] };
+      expect(recut.segments.length).toBeGreaterThan(1);
+      expect(recut.segments.some((s) => s.id === "hand-edited")).toBe(false);
+      expect(projects.getProjectById(project.id)?.segments.some((s) => s.id === "hand-edited")).toBe(false);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("analysis refuses payload.resegment when the project has no transcript to cut from", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    try {
+      const project = baseProject({
+        segments: [
+          {
+            id: "only-segment",
+            projectId: "p1",
+            title: "Segment",
+            startSec: 0,
+            endSec: 20,
+            words: longTranscriptWords(10),
+            score: null,
+            safeZones: [],
+            variants: [],
+            renderPlan: null,
+          },
+        ],
+      });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir });
+
+      jobs.createJob({
+        id: "job-1",
+        projectId: project.id,
+        kind: "analysis",
+        payload: { resegment: true },
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      await expect(
+        handlers.analysis({ job: jobs.claimNextJob()!, reportProgress: () => {} })
+      ).rejects.toThrow(/transcription/i);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+    }
+  });
+
   it("analysis derives one whole-transcript segment when there are zero segments yet", async () => {
     const { db, projects, jobs, owner, exportsBaseDir } = await setup();
     try {
@@ -512,4 +653,65 @@ describe("createDefaultJobHandlers", () => {
       await rm(workDir, { recursive: true, force: true });
     }
   }, 30000);
+
+  /**
+   * The segment carries the edit the user sees in the studio. Rendering
+   * without it produced a file that matched nothing they had chosen.
+   */
+  it("render applies the segment's own render plan", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const workDir = await mkdtemp(path.join(tmpdir(), "peakcut-handlers-plan-"));
+    try {
+      const sourcePath = path.join(workDir, "source.mp4");
+      await createSyntheticVideo(sourcePath, 3);
+
+      const segment = {
+        ...makeSegment("seg-1", 0, 2),
+        renderPlan: buildRenderPlan("hook-emphasis", { segmentId: "seg-1", segmentDurationSec: 2 }),
+      };
+      const project = baseProject({
+        segments: [segment],
+        source: { ...baseProject().source, localFilePath: sourcePath, durationSec: 3 },
+        workflow: authorizeExport(confirmRights(createInitialWorkflow(), "reviewer@example.com")),
+      });
+      projects.createProject(owner.id, project);
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "render", payload: { segmentId: "seg-1" }, now: "2026-01-01T00:00:00.000Z" });
+      const claimed = jobs.claimNextJob()!;
+      const result = (await handlers.render({ job: claimed, reportProgress: () => {} })) as {
+        renderApplied: { zoom: boolean; subtitleStyle: boolean; templateId: string | null };
+      };
+
+      expect(result.renderApplied.templateId).toBe("hook-emphasis");
+      expect(result.renderApplied.zoom).toBe(true);
+      expect(result.renderApplied.subtitleStyle).toBe(true);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+      await rm(workDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("analysis gives every candidate clip an edit to start from", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const words = longTranscriptWords(400);
+    const project = baseProject({
+      segments: [],
+      transcript: { language: "fr", providerId: "test", words },
+    });
+    projects.createProject(owner.id, project);
+    const handlers = createDefaultJobHandlers({ db, exportsBaseDir });
+
+    jobs.createJob({ id: "job-1", projectId: project.id, kind: "analysis", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+    const claimed = jobs.claimNextJob()!;
+    const result = (await handlers.analysis({ job: claimed, reportProgress: () => {} })) as {
+      segments: Array<{ renderPlan: unknown }>;
+    };
+
+    expect(result.segments.length).toBeGreaterThan(0);
+    for (const segment of result.segments) {
+      expect(validateRenderPlan(segment.renderPlan as never).ok).toBe(true);
+    }
+    expect(projects.getProjectById(project.id)?.segments[0].renderPlan).not.toBeNull();
+  });
 });

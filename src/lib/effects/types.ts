@@ -66,7 +66,17 @@ export const INTENSITY_MIN = 0;
 export const INTENSITY_MAX = 1;
 
 export const ZOOM_SCALE_MIN = 1;
-export const ZOOM_SCALE_MAX = 1.15;
+/**
+ * A 35% punch-in: the ceiling short-form editing actually uses, and the
+ * most the frame can take before a 1080p source starts to soften. The
+ * previous 1.15 was imperceptible on a phone — the effect was declared,
+ * validated and applied, and nobody could see it.
+ *
+ * The bound is what makes the zoom safe: the crop region shrinks to
+ * 1/scale of the base crop and is then scaled back to 1080x1920, so a
+ * higher ceiling would upscale a smaller and smaller patch of source.
+ */
+export const ZOOM_SCALE_MAX = 1.35;
 
 export const MIN_CUT_DURATION_SEC = 0.2;
 

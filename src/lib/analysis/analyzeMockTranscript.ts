@@ -41,6 +41,7 @@ function buildScoredSegment(
     score: scoreSegment({ words, startSec, endSec }),
     safeZones: buildDefaultSafeZones(id),
     variants: buildDefaultVariants(id),
+    renderPlan: null,
   };
 }
 

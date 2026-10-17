@@ -168,11 +168,22 @@ CREATE TABLE trial_actors (
 CREATE INDEX idx_trial_actors_expires_at ON trial_actors(expires_at);
 `;
 
+/**
+ * Each segment's editing decisions (lib/effects RenderPlan): zoom
+ * keyframes, caption style, cuts. Nullable, because every segment that
+ * predates this column has no plan and must keep exporting exactly as it
+ * did — a static crop with burned-in captions.
+ */
+const ADD_SEGMENT_RENDER_PLAN_SQL = `
+ALTER TABLE segments ADD COLUMN render_plan_json TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "init_schema", sql: INIT_SCHEMA_SQL },
   { version: 2, name: "add_google_auth", sql: ADD_GOOGLE_AUTH_SQL },
   { version: 3, name: "add_jobs", sql: ADD_JOBS_SQL },
   { version: 4, name: "add_public_trial", sql: ADD_PUBLIC_TRIAL_SQL },
+  { version: 5, name: "add_segment_render_plan", sql: ADD_SEGMENT_RENDER_PLAN_SQL },
 ];
 
 /**

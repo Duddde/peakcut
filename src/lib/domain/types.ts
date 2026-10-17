@@ -7,6 +7,8 @@
  * or virality. See src/lib/scoring/README.md for the explicit disclaimer.
  */
 
+import type { RenderPlan } from "@/lib/effects/types";
+
 export type SourceType = "youtube" | "local-upload";
 
 export interface Source {
@@ -129,6 +131,17 @@ export interface Segment {
   score: Score | null;
   safeZones: SafeZone[];
   variants: Variant[];
+  /**
+   * The clip's editing decisions — zoom keyframes, caption style, cuts —
+   * as a bounded, validated plan (see lib/effects). This is the editable
+   * document behind "the tool did the edit": the analysis fills it with a
+   * template, the user changes it, and the export compiles exactly what
+   * it says.
+   *
+   * null means "no plan recorded": the export then burns captions over a
+   * static crop, which is what every segment did before plans existed.
+   */
+  renderPlan: RenderPlan | null;
 }
 
 export type TimelineTrackKind = "video" | "subtitle";
