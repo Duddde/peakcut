@@ -7,6 +7,7 @@ import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { createInitialWorkflow } from "@/lib/workflow/workflow";
 import { SqliteJobRepository } from "./JobRepository";
 import { runJobWorker, type JobHandlers } from "./worker";
+import { attachChain, nextChainedJob } from "./chain";
 import type { Project } from "@/lib/domain/types";
 
 function setup() {
@@ -151,5 +152,126 @@ describe("runJobWorker", () => {
     const result = await runJobWorker({ repo, handlers: noopHandlers(), signal: controller.signal });
     expect(result.processed).toBe(0);
     expect(repo.getJobById("job-1")?.status).toBe("queued");
+  });
+});
+
+describe("runJobWorker — chained pipeline", () => {
+  const chainedPayload = () =>
+    attachChain({ url: "https://youtu.be/x" }, [
+      { kind: "transcription" as const, payload: { providerId: "openai" } },
+      { kind: "analysis" as const, payload: {} },
+      { kind: "tracking" as const, payload: {} },
+    ]);
+
+  function queueChainHead(repo: SqliteJobRepository, projectId: string) {
+    repo.createJob({
+      id: "job-head",
+      projectId,
+      kind: "download",
+      payload: chainedPayload(),
+      now: "2026-01-01T00:00:00.000Z",
+    });
+  }
+
+  it("enqueues the next step when a chained job succeeds", async () => {
+    const { repo, project } = setup();
+    queueChainHead(repo, project.id);
+
+    const result = await runJobWorker({
+      repo,
+      handlers: noopHandlers({ download: async () => ({ ok: true }) }),
+      once: true,
+      newId: () => "job-next",
+    });
+
+    expect(result.chained).toBe(1);
+    const next = repo.getJobById("job-next");
+    expect(next?.kind).toBe("transcription");
+    expect(next?.status).toBe("queued");
+    expect(next?.projectId).toBe(project.id);
+    expect((next?.payload as { providerId?: string }).providerId).toBe("openai");
+  });
+
+  it("runs the whole pipeline in order, each step enqueued by the previous one", async () => {
+    const { repo, project } = setup();
+    queueChainHead(repo, project.id);
+
+    const ran: string[] = [];
+    const record = (kind: string) => async () => {
+      ran.push(kind);
+      return { kind };
+    };
+    let id = 0;
+    const result = await runJobWorker({
+      repo,
+      handlers: {
+        download: record("download"),
+        transcription: record("transcription"),
+        analysis: record("analysis"),
+        tracking: record("tracking"),
+        render: record("render"),
+      },
+      maxIterations: 10,
+      newId: () => `chained-${++id}`,
+      pollIntervalMs: 0,
+      signal: AbortSignal.timeout(2000),
+    });
+
+    expect(ran).toEqual(["download", "transcription", "analysis", "tracking"]);
+    expect(result.chained).toBe(3);
+  });
+
+  it("stops the pipeline at the step that failed, enqueueing nothing downstream", async () => {
+    const { repo, project } = setup();
+    queueChainHead(repo, project.id);
+
+    const transcription = vi.fn();
+    await runJobWorker({
+      repo,
+      handlers: noopHandlers({
+        download: async () => {
+          throw new Error("yt-dlp indisponible");
+        },
+        transcription,
+      }),
+      maxIterations: 4,
+      newId: () => "never-created",
+      pollIntervalMs: 0,
+    });
+
+    expect(transcription).not.toHaveBeenCalled();
+    expect(repo.getJobById("never-created")).toBeNull();
+    // Retried until its attempts ran out, then terminally failed — and at
+    // no point did a success, and so a chained step, happen.
+    expect(repo.getJobById("job-head")?.status).toBe("failed");
+  });
+
+  it("never enqueues the same step twice, even if the head job is processed again", async () => {
+    const { repo, project } = setup();
+    queueChainHead(repo, project.id);
+    const head = repo.getJobById("job-head")!;
+
+    // Simulate the worker reaching the chaining step twice for one job
+    // (a crash-and-retry between succeedJob and createJob).
+    const first = nextChainedJob(head)!;
+    const second = nextChainedJob(head)!;
+    repo.createJob({ id: "a", projectId: project.id, kind: first.kind, payload: first.payload, idempotencyKey: first.idempotencyKey, now: "t" });
+    const duplicate = repo.createJob({ id: "b", projectId: project.id, kind: second.kind, payload: second.payload, idempotencyKey: second.idempotencyKey, now: "t" });
+
+    expect(duplicate.created).toBe(false);
+    expect(repo.getJobById("b")).toBeNull();
+  });
+
+  it("leaves an unchained job alone", async () => {
+    const { repo, project } = setup();
+    repo.createJob({ id: "solo", projectId: project.id, kind: "analysis", payload: {}, now: "t" });
+
+    const result = await runJobWorker({
+      repo,
+      handlers: noopHandlers({ analysis: async () => ({ segments: [] }) }),
+      once: true,
+    });
+
+    expect(result.chained).toBe(0);
   });
 });

@@ -6,6 +6,7 @@ import {
   STOPWORDS,
   normalizeWord,
 } from "./lexicon";
+import { shortFormDurationFactor } from "@/lib/domain/shortFormDuration";
 
 /**
  * Explainable, deterministic, rule-based scorer for a candidate short-form
@@ -48,13 +49,12 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-function durationFactor(durationSec: number): number {
-  if (durationSec <= 3) return 0;
-  if (durationSec < 15) return (durationSec - 3) / 12;
-  if (durationSec <= 45) return 1;
-  if (durationSec < 90) return 1 - (durationSec - 45) / 45;
-  return 0;
-}
+/**
+ * Shared with the candidate selector so the scorer never penalises the
+ * very lengths segmentTranscript is told to produce — see
+ * lib/domain/shortFormDuration.
+ */
+const durationFactor = shortFormDurationFactor;
 
 function emptyScore(): Score {
   return {

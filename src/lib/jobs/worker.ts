@@ -1,4 +1,5 @@
 import type { JobRepository } from "./JobRepository";
+import { nextChainedJob } from "./chain";
 import type { Job, JobKind } from "./types";
 
 export interface JobHandlerContext {
@@ -31,11 +32,15 @@ export interface RunJobWorkerOptions {
   /** Cooperative shutdown signal — checked between iterations and during idle sleeps. */
   signal?: AbortSignal;
   now?: () => string;
+  /** Id generator for jobs enqueued by a chain. Injected in tests. */
+  newId?: () => string;
 }
 
 export interface RunJobWorkerResult {
   processed: number;
   iterations: number;
+  /** How many follow-up jobs were enqueued because a chained job succeeded. */
+  chained: number;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -51,6 +56,43 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true }
     );
   });
+}
+
+/**
+ * Enqueues the follow-up job of a chained pipeline, after the job that
+ * precedes it has succeeded. Returns whether one was enqueued.
+ *
+ * Enqueued *after* the success is recorded, never before: a crash in
+ * between leaves the pipeline stopped on a completed step, which the user
+ * can resume, rather than running a step whose input may never have been
+ * written. The derived idempotency key makes the insert safe to reach
+ * twice.
+ *
+ * A failure to enqueue must not fail the job that already did its work:
+ * it is reported through the chained job's absence, not by rewriting a
+ * succeeded row into a failed one.
+ */
+function enqueueNextChainedJob(
+  repo: JobRepository,
+  job: Job,
+  newId: () => string,
+  now: () => string
+): boolean {
+  const next = nextChainedJob(job);
+  if (!next) return false;
+  try {
+    repo.createJob({
+      id: newId(),
+      projectId: job.projectId,
+      kind: next.kind,
+      payload: next.payload,
+      idempotencyKey: next.idempotencyKey,
+      now: now(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -75,10 +117,12 @@ export async function runJobWorker(options: RunJobWorkerOptions): Promise<RunJob
     maxIterations = Infinity,
     signal,
     now = () => new Date().toISOString(),
+    newId = () => crypto.randomUUID(),
   } = options;
 
   let processed = 0;
   let iterations = 0;
+  let chained = 0;
 
   while (!signal?.aborted && iterations < maxIterations) {
     iterations++;
@@ -99,6 +143,7 @@ export async function runJobWorker(options: RunJobWorkerOptions): Promise<RunJob
         },
       });
       repo.succeedJob(job.id, result ?? null, now());
+      if (enqueueNextChainedJob(repo, job, newId, now)) chained++;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       const errorCode = err instanceof Error ? err.name : "UnknownError";
@@ -109,5 +154,5 @@ export async function runJobWorker(options: RunJobWorkerOptions): Promise<RunJob
     if (once) break;
   }
 
-  return { processed, iterations };
+  return { processed, iterations, chained };
 }

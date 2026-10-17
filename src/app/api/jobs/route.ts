@@ -12,6 +12,7 @@ import {
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { SqliteJobRepository } from "@/lib/jobs/JobRepository";
 import { JobInputParseError, parseCreateJobInput } from "@/lib/jobs/parseJobInput";
+import { attachChain, buildAutoPipelineChain, ChainConfigurationError, type ChainStep } from "@/lib/jobs/chain";
 import { redactJobForResponse } from "@/lib/jobs/redactJob";
 
 /**
@@ -89,12 +90,35 @@ export function createJobsCreateHandler(
       }
     }
 
+    // Every chained step is enqueued by the worker, which does not go back
+    // through this route's per-kind trial quota. A trial visitor therefore
+    // runs the steps one at a time, each counted; the pipeline is for
+    // accounts.
+    if (input.pipeline && actor.kind === "trial") {
+      return NextResponse.json(
+        { ok: false, error: "L'enchaînement automatique n'est pas disponible pendant l'essai public." },
+        { status: 403 }
+      );
+    }
+
+    let chain: ChainStep[] = [];
+    if (input.pipeline) {
+      try {
+        chain = buildAutoPipelineChain(input.kind, input.pipeline);
+      } catch (err) {
+        if (err instanceof ChainConfigurationError) {
+          return NextResponse.json({ ok: false, error: err.message }, { status: 422 });
+        }
+        throw err;
+      }
+    }
+
     const jobRepo = new SqliteJobRepository(deps.db);
     const { job, created } = jobRepo.createJob({
       id: randomUUID(),
       projectId: input.projectId,
       kind: input.kind,
-      payload: input.payload,
+      payload: attachChain((input.payload ?? {}) as Record<string, unknown>, chain),
       // A trial can't buy itself extra worker time through retries.
       maxAttempts: actor.kind === "trial" ? undefined : input.maxAttempts,
       idempotencyKey: input.idempotencyKey,

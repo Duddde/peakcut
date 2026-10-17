@@ -1,3 +1,4 @@
+import { CHAIN_PAYLOAD_KEY, type AutoPipelineOptions } from "./chain";
 import { JOB_KINDS, type JobKind } from "./types";
 
 export class JobInputParseError extends Error {
@@ -15,6 +16,12 @@ export interface CreateJobInput {
   payload: unknown;
   idempotencyKey: string | null;
   maxAttempts: number | undefined;
+  /**
+   * Present when the caller asked for the automatic pipeline to continue
+   * after this job (see lib/jobs/chain). The follow-up steps themselves
+   * are built server-side from this request — never taken from the body.
+   */
+  pipeline: AutoPipelineOptions | null;
 }
 
 /**
@@ -42,6 +49,17 @@ export function parseCreateJobInput(raw: unknown): CreateJobInput {
     throw new JobInputParseError("payload doit être un objet.");
   }
 
+  // The chain decides what else runs, under this project, without passing
+  // back through this route's ownership and quota checks. It is therefore
+  // built from `pipeline` on the server and never accepted from a client.
+  if (body.payload && typeof body.payload === "object" && CHAIN_PAYLOAD_KEY in (body.payload as object)) {
+    throw new JobInputParseError(
+      `payload.${CHAIN_PAYLOAD_KEY} est réservé : demandez l'enchaînement avec "pipeline".`
+    );
+  }
+
+  const pipeline = parsePipeline(body.pipeline);
+
   let idempotencyKey: string | null = null;
   if ("idempotencyKey" in body && body.idempotencyKey !== undefined && body.idempotencyKey !== null) {
     if (typeof body.idempotencyKey !== "string" || body.idempotencyKey.trim().length === 0) {
@@ -67,5 +85,39 @@ export function parseCreateJobInput(raw: unknown): CreateJobInput {
     payload: "payload" in body ? body.payload : {},
     idempotencyKey,
     maxAttempts,
+    pipeline,
   };
+}
+
+/**
+ * `pipeline` asks for the rest of the automatic pipeline to follow this
+ * job: `true` for its defaults, or an object to name the transcription
+ * provider and tracking engine it should use.
+ */
+function parsePipeline(raw: unknown): AutoPipelineOptions | null {
+  if (raw === undefined || raw === null || raw === false) return null;
+  if (raw === true) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new JobInputParseError("pipeline doit valoir true ou être un objet d'options.");
+  }
+
+  const options = raw as Record<string, unknown>;
+  const result: AutoPipelineOptions = {};
+
+  for (const key of ["providerId", "trackProvider"] as const) {
+    if (options[key] === undefined) continue;
+    if (typeof options[key] !== "string" || (options[key] as string).trim().length === 0) {
+      throw new JobInputParseError(`pipeline.${key} doit être une chaîne non vide.`);
+    }
+    result[key] = (options[key] as string).trim();
+  }
+
+  if (options.resegment !== undefined) {
+    if (typeof options.resegment !== "boolean") {
+      throw new JobInputParseError("pipeline.resegment doit être un booléen.");
+    }
+    result.resegment = options.resegment;
+  }
+
+  return result;
 }

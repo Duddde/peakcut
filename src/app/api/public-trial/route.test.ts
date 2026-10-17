@@ -420,3 +420,48 @@ describe("isolation between private accounts and trial projects", () => {
     expect(saved.source.localFilePath).toBeUndefined();
   });
 });
+
+describe("essai public et enchaînement automatique", () => {
+  /**
+   * Every chained step is enqueued by the worker, which never passes back
+   * through the route's per-kind trial quota. Letting a trial visitor ask
+   * for a pipeline would hand them the whole queue for one quota hit.
+   */
+  it("refuses the automatic pipeline to a trial actor, and queues nothing", async () => {
+    const deps = createTestAppDeps();
+    vi.stubEnv("PEAKCUT_PUBLIC_TRIAL", "1");
+    const cookies = await startTrial(deps);
+    const { json } = await createProject(deps, cookies);
+    const projectId = json.project.id as string;
+
+    const res = await createJobsCreateHandler(deps)(
+      req("/api/jobs", {
+        method: "POST",
+        body: { projectId, kind: "transcription", payload: { providerId: "openai" }, pipeline: { providerId: "openai" } },
+        cookies,
+      })
+    );
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toMatch(/essai public/i);
+    expect(deps.db.prepare("SELECT COUNT(*) AS n FROM jobs").get()).toEqual({ n: 0 });
+  });
+
+  it("still lets a trial actor run a single step at a time", async () => {
+    const deps = createTestAppDeps();
+    vi.stubEnv("PEAKCUT_PUBLIC_TRIAL", "1");
+    const cookies = await startTrial(deps);
+    const { json } = await createProject(deps, cookies);
+    const projectId = json.project.id as string;
+
+    const res = await createJobsCreateHandler(deps)(
+      req("/api/jobs", {
+        method: "POST",
+        body: { projectId, kind: "transcription", payload: { providerId: "openai" } },
+        cookies,
+      })
+    );
+
+    expect(res.status).toBe(201);
+  });
+});

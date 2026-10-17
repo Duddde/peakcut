@@ -83,3 +83,17 @@ export function parseJobResponse(raw: unknown): ParsedJob {
     idempotencyKey: nullableStr(j.idempotencyKey, "job.idempotencyKey"),
   };
 }
+
+/**
+ * Boundary parse of `{ ok, jobs }` from GET /api/projects/:id/jobs. A
+ * single malformed row fails the whole list rather than being skipped
+ * silently: a pipeline follower that quietly loses a step would report a
+ * finished pipeline that is still running.
+ */
+export function parseJobListResponse(raw: unknown): ParsedJob[] {
+  const envelope = obj(raw, "réponse");
+  if (!Array.isArray(envelope.jobs)) {
+    throw new JobResponseParseError("jobs doit être un tableau.");
+  }
+  return envelope.jobs.map((job) => parseJobResponse({ job }));
+}
