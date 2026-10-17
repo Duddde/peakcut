@@ -178,12 +178,36 @@ const ADD_SEGMENT_RENDER_PLAN_SQL = `
 ALTER TABLE segments ADD COLUMN render_plan_json TEXT;
 `;
 
+/**
+ * Illustrations a clip can lay over the video: an uploaded image, or one
+ * generated from a prompt. Only metadata is stored — the bytes live on
+ * disk and their path is *derived* from (base dir, project id, asset id,
+ * type), never recorded, exactly like `export_jobs` never records an
+ * export's path. `prompt` is the user's own text, kept so a generated
+ * illustration can say where it came from; it is never an API key or any
+ * other secret.
+ */
+const ADD_ASSETS_SQL = `
+CREATE TABLE assets (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  origin TEXT NOT NULL,
+  prompt TEXT,
+  provider_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_assets_project_id ON assets(project_id);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, name: "init_schema", sql: INIT_SCHEMA_SQL },
   { version: 2, name: "add_google_auth", sql: ADD_GOOGLE_AUTH_SQL },
   { version: 3, name: "add_jobs", sql: ADD_JOBS_SQL },
   { version: 4, name: "add_public_trial", sql: ADD_PUBLIC_TRIAL_SQL },
   { version: 5, name: "add_segment_render_plan", sql: ADD_SEGMENT_RENDER_PLAN_SQL },
+  { version: 6, name: "add_assets", sql: ADD_ASSETS_SQL },
 ];
 
 /**

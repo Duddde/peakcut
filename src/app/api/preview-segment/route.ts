@@ -15,6 +15,9 @@ import {
   type PublicTrialRateLimiters,
 } from "@/lib/publicTrial/quotas";
 import { drawtextFontFragment, renderPreviewSegment } from "@/lib/ffmpeg/renderPreviewSegment";
+import { SqliteAssetRepository } from "@/lib/assets/AssetRepository";
+import { defaultAssetsBaseDir } from "@/lib/assets/assetStore";
+import { resolveOverlayFiles } from "@/lib/assets/resolveOverlayFiles";
 import type { NormalizedRect, Segment, TranscriptWord } from "@/lib/domain/types";
 import type { RenderPlan } from "@/lib/effects/types";
 
@@ -29,6 +32,8 @@ export interface PreviewHandlerOptions {
   enabled?: boolean;
   /** Where the worker writes downloaded YouTube sources; a project preview may read from it too. */
   downloadsBaseDir?: string;
+  /** Root of the illustration store; defaults to the PEAKCUT_ASSETS_DIR convention. */
+  assetsBaseDir?: string;
   appDeps?: AppDeps;
   trialRateLimiters?: PublicTrialRateLimiters;
 }
@@ -70,6 +75,8 @@ interface ProjectPreview {
   crop?: NormalizedRect;
   words: TranscriptWord[];
   renderPlan?: RenderPlan;
+  /** The plan's illustrations, already resolved to files of this project. */
+  overlayFiles: Record<string, string>;
 }
 
 /** The variant the caller asked for, else the segment's first. */
@@ -126,6 +133,10 @@ async function resolveProjectPreview(
     crop: pickVariant(segment, body.variantId)?.crop,
     words: segment.words,
     renderPlan: segment.renderPlan ?? undefined,
+    overlayFiles: resolveOverlayFiles(segment.renderPlan, project.id, {
+      repo: new SqliteAssetRepository(deps.db),
+      baseDir: options.assetsBaseDir ?? defaultAssetsBaseDir(),
+    }),
   };
 }
 
@@ -198,6 +209,7 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
           crop: projectPreview.crop,
           words: projectPreview.words,
           renderPlan: projectPreview.renderPlan,
+          overlayFiles: projectPreview.overlayFiles,
         }));
       } else {
         // drawtext needs a real font file: left to fontconfig, it segfaults

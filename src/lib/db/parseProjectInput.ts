@@ -169,6 +169,28 @@ function parseRenderPlanInput(raw: unknown, field: string): RenderPlan | null {
         endSec: num(c.endSec, `${field}.cuts[${i}].endSec`),
       };
     }),
+    // Absent on every plan saved before illustrations existed, which must
+    // keep loading: no overlays is a plan without illustrations, not a
+    // malformed one.
+    overlays: arr(p.overlays ?? [], `${field}.overlays`).map((rawOverlay, i) => {
+      const at = `${field}.overlays[${i}]`;
+      const o = obj(rawOverlay, at);
+      const rect = obj(o.rect, `${at}.rect`);
+      return {
+        id: str(o.id, `${at}.id`),
+        assetId: str(o.assetId, `${at}.assetId`),
+        startSec: num(o.startSec, `${at}.startSec`),
+        endSec: num(o.endSec, `${at}.endSec`),
+        opacity: num(o.opacity, `${at}.opacity`),
+        fadeSec: num(o.fadeSec, `${at}.fadeSec`),
+        rect: {
+          x: num(rect.x, `${at}.rect.x`),
+          y: num(rect.y, `${at}.rect.y`),
+          width: num(rect.width, `${at}.rect.width`),
+          height: num(rect.height, `${at}.rect.height`),
+        },
+      };
+    }),
     zoomKeyframes: arr(p.zoomKeyframes, `${field}.zoomKeyframes`).map((rawKf, i) => {
       const k = obj(rawKf, `${field}.zoomKeyframes[${i}]`);
       return {

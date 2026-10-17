@@ -175,6 +175,9 @@ export function buildRenderPlan(templateId: EffectTemplateId, context: BuildRend
     templateId,
     intensity: output.intensity,
     cuts: tooShortToEdit ? [] : [{ startSec: 0, endSec: durationSec }],
+    // No template invents an illustration: there is no image to show
+    // until the user adds or generates one (see lib/assets).
+    overlays: [],
     zoomKeyframes: tooShortToEdit ? [{ tSec: 0, scale: ZOOM_SCALE_MIN }] : output.zoomKeyframes,
     subtitleStyle: output.subtitleStyle,
     safeZones: buildDefaultSafeZones(context.segmentId),

@@ -1,4 +1,22 @@
-import { MIN_CUT_DURATION_SEC, ZOOM_SCALE_MIN, type RenderPlan } from "./types";
+import { MIN_CUT_DURATION_SEC, MIN_OVERLAY_DURATION_SEC, ZOOM_SCALE_MIN, type Overlay, type RenderPlan } from "./types";
+
+/**
+ * Illustrations follow the clip too: one that now ends past the end is
+ * shortened, and one left shorter than it takes to see is dropped rather
+ * than kept as a flash. Its fade is shortened with it, since a fade
+ * longer than half the overlay is exactly what the validator refuses.
+ */
+function retimeOverlays(overlays: Overlay[], lastEnd: number): Overlay[] {
+  const retimed: Overlay[] = [];
+  for (const overlay of overlays) {
+    const startSec = Math.min(overlay.startSec, lastEnd);
+    const endSec = Math.min(overlay.endSec, lastEnd);
+    const duration = endSec - startSec;
+    if (duration < MIN_OVERLAY_DURATION_SEC) continue;
+    retimed.push({ ...overlay, startSec, endSec, fadeSec: Math.min(overlay.fadeSec, duration / 2) });
+  }
+  return retimed;
+}
 
 /**
  * Re-fits a clip's plan to a new clip duration.
@@ -21,7 +39,7 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number): RenderP
 
   if (duration < MIN_CUT_DURATION_SEC) {
     // Too short to carry a cut at all; same degradation buildRenderPlan applies.
-    return { ...plan, cuts: [], zoomKeyframes: [{ tSec: 0, scale: ZOOM_SCALE_MIN }] };
+    return { ...plan, cuts: [], zoomKeyframes: [{ tSec: 0, scale: ZOOM_SCALE_MIN }], overlays: [] };
   }
 
   const cuts = plan.cuts
@@ -36,6 +54,7 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number): RenderP
   return {
     ...plan,
     cuts: effectiveCuts,
+    overlays: retimeOverlays(plan.overlays, lastEnd),
     // A clip always keeps at least one keyframe: an empty list would make
     // the export fall back to a static crop without saying why.
     zoomKeyframes: keyframes.length > 0 ? keyframes : [{ tSec: 0, scale: ZOOM_SCALE_MIN }],

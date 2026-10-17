@@ -14,6 +14,7 @@ PeakCut est un MVP de repurposing vidéo orienté Shorts. Il transforme un proje
 - Découpage en clips candidats : le transcript est coupé en clips d’une minute (50–95 s) alignés sur des fins de phrase, classés par ce même score.
 - Montage par clip, modifiable : zoom animé et style de sous-titres compilés réellement par l’export, et éditables dans le studio.
 - Timeline éditable : clips placés à leur vraie position, rognage à la souris ou au clavier, découpe et suppression — avec re-découpage des sous-titres, re-score et réajustement des effets.
+- Illustrations par clip : image importée ou générée par IA, placée et minutée dans le studio, réellement incrustée par l'export et par l'aperçu.
 - Éditeur de démonstration : segments, timeline, texte et mots éditables, cadrage et safe zones pour les variantes 9:16, 1:1, 4:5 et 16:9.
 - Export FFmpeg réel depuis le fichier média du projet (import local ou vidéo YouTube téléchargée) : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot et vérification ffprobe.
 - Validation humaine par défaut ; aucune publication YouTube/TikTok n’est implémentée dans ce MVP.
@@ -244,29 +245,51 @@ le document éditable derrière « l’outil a fait le montage ».
   limitations, elle, n’est jamais lue depuis le client : ce que l’export ne
   fait pas est une affirmation du serveur sur lui-même.
 
-## Timeline : rogner, couper, supprimer
+## Illustrations : images importées ou générées
 
-Les clips sont posés sur l’axe temporel de la source — à leur vraie place, donc
-les passages que personne n’a gardés se voient. Les bords se glissent à la
-souris, ou se déplacent aux flèches ← → une fois la poignée sélectionnée (le
-montage ne doit pas exiger une souris). Deux actions complètent le lot sur le
-clip sélectionné : « Couper en deux » et « Supprimer ce clip ».
+Un clip peut porter des illustrations : une image posée sur la vidéo pendant
+quelques secondes, en haut, au centre, en bas ou en plein cadre. Elles vivent
+dans le plan de rendu du clip (`renderPlan.overlays`), donc elles suivent les
+mêmes règles que le reste du montage — bornées, revalidées côté serveur,
+réajustées quand on rogne le clip, et **réellement incrustées** par FFmpeg à
+l'export comme à l'aperçu.
 
-Déplacer une borne ne change **jamais** seulement deux nombres. Un segment
-porte aussi la tranche de transcript incrustée en sous-titres, un score calculé
-sur cette tranche et un plan d’effets exprimé en temps relatif au clip.
-`src/lib/analysis/retimeSegment.ts` garde les quatre en phase :
+Deux façons d'obtenir une image, dans le panneau « Illustrations du clip » :
 
-- les mots sont **re-découpés** depuis le transcript du projet — rogner enlève
-  ce qui sort, rallonger ramène ce qui rentre ;
-- le score est **recalculé** pour la nouvelle durée ;
-- le plan d’effets est **réajusté** (`retimeRenderPlan`) : la coupe suit le
-  clip, les images clés qui tombent après la nouvelle fin sont retirées.
+- **Importer** un PNG, un JPEG ou un WebP. Le type déclaré par le navigateur
+  n'est pas cru : la signature du fichier est lue, et un fichier qui se
+  prétend une image sans en être une est refusé plutôt que renommé.
+- **Générer** à partir d'une description, via un fournisseur configuré
+  (`openai-gpt-image-1` aujourd'hui, voir `/api/image-providers`). Sans clé,
+  la route répond 503 et n'invente jamais d'image de remplacement. La
+  génération est refusée à l'essai public — un essai est anonyme, personne ne
+  peut en être facturé — et limitée à 20 appels par heure et par compte, parce
+  qu'une boucle côté client se traduirait sinon directement en facture.
 
-Ce dernier point n’est pas cosmétique : sans lui, raccourcir un clip laissait
-des images clés hors de sa plage, `validateRenderPlan` refusait le plan à
-l’enregistrement, et l’utilisateur restait coincé entre une retouche qu’il
-venait de faire et des effets qu’il n’avait pas touchés.
+Les octets sont stockés par projet sur le disque (`PEAKCUT_ASSETS_DIR`, par
+défaut `.data/assets`) ; la base ne garde que des métadonnées et **aucun
+chemin** : il est recalculé depuis les identifiants, comme pour les aperçus.
+Une illustration est donc toujours lue *à travers son projet* — un identifiant
+appartenant à quelqu'un d'autre ne résout rien, et ne peut pas servir à lire
+un fichier de la machine.
+
+Côté rendu, chaque image devient une entrée FFmpeg bouclée (`-loop 1`) dont les
+images partagent la ligne de temps du clip : `fade` et
+`overlay=…:enable='between(t,…)'` parlent alors directement en secondes du
+clip, sans recalage de timestamps. L'image garde ses proportions
+(`force_original_aspect_ratio=decrease`) et est centrée dans sa boîte : étirer
+l'illustration de quelqu'un au rectangle exact qu'il a choisi serait le filtre
+le plus simple et le mauvais. Une image manquante ne fait jamais échouer le
+rendu : le clip s'exporte sans elle et le dit dans ses limitations.
+
+Un détail qui n'en est pas un : aucun placement sauf « plein cadre » ne descend
+dans la zone des sous-titres. Une illustration ne peut pas enterrer le texte.
+
+Configuration, en clair : la génération réutilise `OPENAI_API_KEY`,
+`PEAKCUT_IMAGE_TIMEOUT_MS` borne la requête au fournisseur (3 minutes par
+défaut) et `PEAKCUT_ASSETS_DIR` dit où vivent les octets. Aucune de ces
+variables n'est requise : sans elles, l'import d'images fonctionne et la
+génération se déclare indisponible.
 
 ## Timeline : rogner, couper, supprimer
 
@@ -362,6 +385,9 @@ src/
   lib/domain/                  # types de projet et d’édition
   lib/youtube/                 # validation d’URL et téléchargement vidéo (yt-dlp)
   lib/transcript/              # interface et adaptateurs de transcription
+  lib/images/                  # interface et adaptateurs de génération d'images
+  lib/assets/                  # magasin d'illustrations (octets sur disque, métadonnées en base)
+  lib/effects/                 # plan de rendu par clip et compilation en filtres FFmpeg
   lib/scoring/                 # score déterministe et explications
   lib/ffmpeg/                  # ASS, export et vérification ffprobe
   lib/demo/                    # projet de démonstration
@@ -408,7 +434,7 @@ par `/api/download-youtube` ci-dessus.
 - Le suivi de visage est réel (OpenCV, cascade de Haar). Le suivi de locuteur et d’objet, et les effets avancés, restent à intégrer derrière des adaptateurs de rendu testables.
 - Le cadrage suivi vaut pour une source filmée face caméra. Sur un partage d’écran, la cascade ne trouve que la webcam incrustée et le recadrage 9:16 cadre ce visage plutôt que le contenu montré — préférez-y `stable-center-fallback`, ou un recadrage manuel.
 - `gpt-4o-transcribe-diarize` renvoie des segments, pas des mots : les bornes mot-à-mot sont donc **interpolées** au prorata du nombre de caractères, et le surlignage des sous-titres dérive à l’intérieur d’un segment. L’API ne fournissant aucune confiance par mot, la valeur neutre de 0,5 est utilisée — ce qui déclenche sur chaque segment la pénalité « confiance de transcription faible » du scorer, uniformément.
-- Les effets appliqués se limitent au zoom animé et au style des sous-titres. Les illustrations incrustées, les images générées par IA, les effets 3D et le ducking audio sont déclarés dans le modèle mais pas encore compilés par l’export : `renderPlan.limitations` dit précisément lesquels, sur chaque plan.
+- Les effets réellement compilés par l’export sont le zoom animé, le style des sous-titres et les illustrations incrustées. Les effets 3D et le ducking audio sont déclarés dans le modèle mais pas encore appliqués : `renderPlan.limitations` dit précisément lesquels, sur chaque plan.
 - Le cadrage suit le visage détecté mais pas **le locuteur actif** : sur un plan à deux visages, le recadrage ne bascule pas sur celui qui parle.
 - Les publications officielles nécessiteront OAuth, les permissions adéquates et une validation humaine explicite.
 

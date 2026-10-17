@@ -119,6 +119,28 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     return { tSec: requireNumber(k.tSec, `zoomKeyframes[${index}].tSec`), scale: requireNumber(k.scale, `zoomKeyframes[${index}].scale`) };
   });
 
+  // A plan predating illustrations simply has none; structural parse only,
+  // exactly like the rest of this function — bounds are re-checked at
+  // export time by validateRenderPlan.
+  const overlays = requireArray(plan.overlays ?? [], "overlays").map((raw, index) => {
+    const o = requireObject(raw, `overlays[${index}]`);
+    const rect = requireObject(o.rect, `overlays[${index}].rect`);
+    return {
+      id: requireString(o.id, `overlays[${index}].id`),
+      assetId: requireString(o.assetId, `overlays[${index}].assetId`),
+      startSec: requireNumber(o.startSec, `overlays[${index}].startSec`),
+      endSec: requireNumber(o.endSec, `overlays[${index}].endSec`),
+      opacity: requireNumber(o.opacity, `overlays[${index}].opacity`),
+      fadeSec: requireNumber(o.fadeSec, `overlays[${index}].fadeSec`),
+      rect: {
+        x: requireNumber(rect.x, `overlays[${index}].rect.x`),
+        y: requireNumber(rect.y, `overlays[${index}].rect.y`),
+        width: requireNumber(rect.width, `overlays[${index}].rect.width`),
+        height: requireNumber(rect.height, `overlays[${index}].rect.height`),
+      },
+    };
+  });
+
   const styleRaw = requireObject(plan.subtitleStyle, "subtitleStyle");
   const subtitleStyle = {
     fontSizeScale: requireNumber(styleRaw.fontSizeScale, "subtitleStyle.fontSizeScale"),
@@ -160,6 +182,7 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     intensity: requireNumber(plan.intensity, "intensity"),
     cuts,
     zoomKeyframes,
+    overlays,
     subtitleStyle,
     safeZones,
     audioDucking,

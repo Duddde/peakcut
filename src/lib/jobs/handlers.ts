@@ -13,6 +13,9 @@ import { buildDefaultVariants } from "@/lib/domain/defaultVariants";
 import { defaultRenderPlanFor } from "@/lib/effects/defaultRenderPlanFor";
 import { verifyExport } from "@/lib/ffmpeg/verifyExport";
 import { exportSegment } from "@/lib/ffmpeg/exportSegment";
+import { SqliteAssetRepository } from "@/lib/assets/AssetRepository";
+import { defaultAssetsBaseDir } from "@/lib/assets/assetStore";
+import { resolveOverlayFiles } from "@/lib/assets/resolveOverlayFiles";
 import { getExportBlockReasons } from "@/lib/workflow/exportGate";
 import { StableCenterFrameTracker } from "@/lib/tracking/StableCenterFrameTracker";
 import { LocalSubjectTracker } from "@/lib/tracking/LocalSubjectTracker";
@@ -48,6 +51,8 @@ export interface DefaultJobHandlersDeps {
   exportsBaseDir: string;
   /** Base directory downloaded sources are written under. Defaults to the PEAKCUT_DOWNLOADS_DIR / .data/downloads convention. */
   downloadsBaseDir?: string;
+  /** Base directory of the illustration store. Defaults to the PEAKCUT_ASSETS_DIR / .data/assets convention. */
+  assetsBaseDir?: string;
   providers?: TranscriptProvider[];
   trackerFactory?: TrackerFactory;
   /** Injected in tests; defaults to the real yt-dlp-backed downloader. */
@@ -149,6 +154,8 @@ function buildCandidateSegments(projectId: string, words: Segment["words"], nowM
  */
 export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandlers {
   const projectRepo = new SqliteProjectRepository(deps.db);
+  const assetRepo = new SqliteAssetRepository(deps.db);
+  const assetsBaseDir = deps.assetsBaseDir ?? defaultAssetsBaseDir();
 
   let cachedDownloader: VideoDownloader | null = deps.videoDownloader ?? null;
   let cachedTrialDownloader: VideoDownloader | null = deps.trialVideoDownloader ?? null;
@@ -365,6 +372,11 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       // whatever the user changed since. Without this, the export ignored
       // every edit the studio let them make.
       renderPlan: segment.renderPlan ?? undefined,
+      // Ids become files here and nowhere else, scoped to this project.
+      overlayFiles: resolveOverlayFiles(segment.renderPlan, project.id, {
+        repo: assetRepo,
+        baseDir: assetsBaseDir,
+      }),
     });
     reportProgress(90);
 

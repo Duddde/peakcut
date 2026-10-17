@@ -4,6 +4,7 @@ import type { NormalizedRect, TranscriptWord } from "@/lib/domain/types";
 import { buildAssSubtitles } from "./buildAssSubtitles";
 import { EXPORT_WIDTH, EXPORT_HEIGHT } from "./exportSpec";
 import { compileZoomFilter } from "@/lib/effects/compileZoomFilter";
+import { compileOverlayFilters, type OverlayInput } from "@/lib/effects/compileOverlayFilters";
 import { validateFilterGraph } from "@/lib/effects/validateFilterGraph";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
 import type { RenderPlan } from "@/lib/effects/types";
@@ -29,12 +30,22 @@ export interface ExportSegmentInput {
    * what happened.
    */
   renderPlan?: RenderPlan;
+  /**
+   * Local file of each illustration the plan refers to, by asset id —
+   * resolved by the caller, which is the only layer that knows the
+   * project and may read its asset store (see lib/assets). An overlay
+   * whose asset is absent here is skipped and reported in
+   * `renderLimitations`; the clip still exports.
+   */
+  overlayFiles?: Record<string, string>;
 }
 
 export interface RenderApplied {
   zoom: boolean;
   subtitleStyle: boolean;
   ducking: boolean;
+  /** How many of the plan's illustrations were actually composited. */
+  overlays: number;
   templateId: string | null;
 }
 
@@ -118,12 +129,119 @@ function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: Re
   };
 }
 
+/**
+ * The illustrations that can actually be rendered: those of a valid plan
+ * whose asset the caller resolved to a real file. A missing file is a
+ * note, never a failure — an export that refuses to run because one
+ * illustration went missing would lose the whole clip over a decoration.
+ */
+function resolveOverlayInputs(
+  renderPlan: RenderPlan | undefined,
+  planIsValid: boolean,
+  overlayFiles: Record<string, string> | undefined
+): { inputs: OverlayInput[]; notes: string[] } {
+  if (!renderPlan || !planIsValid || renderPlan.overlays.length === 0) {
+    return { inputs: [], notes: [] };
+  }
+
+  const inputs: OverlayInput[] = [];
+  const notes: string[] = [];
+  for (const overlay of renderPlan.overlays) {
+    const filePath = overlayFiles?.[overlay.assetId];
+    if (!filePath) {
+      notes.push(`Illustration "${overlay.id}" ignorée : son image est introuvable dans le projet.`);
+      continue;
+    }
+    inputs.push({ overlay, filePath });
+  }
+  return { inputs, notes };
+}
+
 function buildVideoFilter(assPath: string, resolved: ResolvedVideoFilter): string {
   const cropAndScale = resolved.includesFinalScale
     ? resolved.cropFragment
     : `${resolved.cropFragment},scale=${EXPORT_WIDTH}:${EXPORT_HEIGHT}`;
   const escapedAssPath = escapeFfmpegFilterPath(assPath);
   return `${cropAndScale},setsar=1,ass='${escapedAssPath}'`;
+}
+
+interface OverlayArgs {
+  /** Extra `-i` groups for the illustration images, in input order. */
+  inputArgs: string[];
+  /** Either `["-vf", filter]` (no illustration) or `["-filter_complex", graph, "-map", …]`. */
+  filterArgs: string[];
+  appliedCount: number;
+  notes: string[];
+}
+
+/**
+ * Chooses between the two shapes an export can take.
+ *
+ * With no illustration to composite, the command is exactly what it has
+ * always been: a single input and a `-vf` chain. One extra image means
+ * extra inputs, which `-vf` cannot address, so the same chain is moved
+ * into a `-filter_complex` graph and the streams are mapped explicitly —
+ * `0:a?` because a source without an audio track must still export.
+ *
+ * The compiled overlay chain is re-checked by the independent filtergraph
+ * validator before it is used, and a chain that fails it is dropped: the
+ * clip then exports without its illustrations, and says so, rather than
+ * handing ffmpeg a graph nobody vouched for. Only the overlay part is
+ * checked — the crop fragment has already been validated on its own, and
+ * the subtitle file's path is deliberately left out of that check, since
+ * an escaped Windows path contains backslashes the validator refuses by
+ * design.
+ */
+function buildOverlayArgs(
+  videoFilter: string,
+  renderPlan: RenderPlan | undefined,
+  planIsValid: boolean,
+  overlayFiles: Record<string, string> | undefined
+): OverlayArgs {
+  const resolved = resolveOverlayInputs(renderPlan, planIsValid, overlayFiles);
+  const noOverlays: OverlayArgs = {
+    inputArgs: [],
+    filterArgs: ["-vf", videoFilter],
+    appliedCount: 0,
+    notes: resolved.notes,
+  };
+  if (resolved.inputs.length === 0) return noOverlays;
+
+  const compiled = compileOverlayFilters({
+    overlays: resolved.inputs,
+    outputWidth: EXPORT_WIDTH,
+    outputHeight: EXPORT_HEIGHT,
+    baseLabel: "vbase",
+    firstInputIndex: 1,
+  });
+  if (!compiled.chain) {
+    return { ...noOverlays, notes: [...resolved.notes, ...compiled.notes] };
+  }
+
+  const graphCheck = validateFilterGraph(compiled.chain);
+  if (!graphCheck.ok) {
+    return {
+      ...noOverlays,
+      notes: [
+        ...resolved.notes,
+        `Illustrations rejetées par la validation indépendante du filtergraph : ${graphCheck.errors.join(" ")}`,
+      ],
+    };
+  }
+
+  return {
+    inputArgs: compiled.inputArgs,
+    filterArgs: [
+      "-filter_complex",
+      `[0:v]${videoFilter}[vbase];${compiled.chain}`,
+      "-map",
+      `[${compiled.outputLabel}]`,
+      "-map",
+      "0:a?",
+    ],
+    appliedCount: compiled.appliedCount,
+    notes: [...resolved.notes, ...compiled.notes],
+  };
 }
 
 function runFfmpeg(args: string[]): Promise<void> {
@@ -179,14 +297,20 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
   await writeFile(assPath, assContent, "utf-8");
 
   const videoFilter = buildVideoFilter(assPath, resolvedCrop);
+  const overlays = buildOverlayArgs(videoFilter, renderPlan, planIsValid, input.overlayFiles);
 
   const renderApplied: RenderApplied = {
     zoom: resolvedCrop.zoomApplied,
     subtitleStyle: subtitleStyleApplied,
     ducking: false,
+    overlays: overlays.appliedCount,
     templateId: renderPlan?.templateId ?? null,
   };
-  const renderLimitations = [...(renderPlan?.limitations ?? []), ...resolvedCrop.notes];
+  const renderLimitations = [
+    ...(renderPlan?.limitations ?? []),
+    ...resolvedCrop.notes,
+    ...overlays.notes,
+  ];
 
   const args = [
     "-y",
@@ -194,10 +318,10 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
     startSec.toFixed(3),
     "-i",
     inputMediaPath,
+    ...overlays.inputArgs,
     "-t",
     durationSec.toFixed(3),
-    "-vf",
-    videoFilter,
+    ...overlays.filterArgs,
     "-c:v",
     "libx264",
     "-preset",

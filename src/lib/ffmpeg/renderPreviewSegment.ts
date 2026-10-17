@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import type { NormalizedRect, TranscriptWord } from "@/lib/domain/types";
 import { compileZoomFilter } from "@/lib/effects/compileZoomFilter";
+import { compileOverlayFilters, type OverlayInput } from "@/lib/effects/compileOverlayFilters";
 import { validateFilterGraph } from "@/lib/effects/validateFilterGraph";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
 import type { RenderPlan } from "@/lib/effects/types";
@@ -48,6 +49,13 @@ export interface RenderPreviewSegmentInput {
    * edited, not a bare crop of the source.
    */
   renderPlan?: RenderPlan;
+  /**
+   * Local file of each illustration the plan refers to, by asset id —
+   * same contract as exportSegment: resolved by the caller, and an
+   * illustration whose image is absent is simply not shown. A preview
+   * must show the same edit the export will, illustrations included.
+   */
+  overlayFiles?: Record<string, string>;
 }
 
 export interface RenderPreviewSegmentResult {
@@ -56,7 +64,7 @@ export interface RenderPreviewSegmentResult {
   /** Written only when captions were burned in; the caller owns cleanup, as with exportSegment. */
   assPath: string | null;
   /** What of the plan actually made it into this preview. */
-  renderApplied: { zoom: boolean; subtitles: boolean };
+  renderApplied: { zoom: boolean; subtitles: boolean; overlays: number };
 }
 
 function escapeDrawtext(text: string): string {
@@ -186,8 +194,52 @@ function previewCropFragment(
   return { fragment: compiled.filterFragment, zoomApplied: compiled.zoomApplied };
 }
 
+/**
+ * The preview's illustrations, compiled exactly as the export compiles
+ * them — only at preview resolution. With none to composite, the command
+ * keeps its single input and its `-vf` chain; with any, the chain moves
+ * into a `-filter_complex` graph and the streams are mapped explicitly.
+ */
+function previewOverlayArgs(
+  videoFilter: string,
+  renderPlan: RenderPlan | undefined,
+  overlayFiles: Record<string, string> | undefined
+): { inputArgs: string[]; filterArgs: string[]; appliedCount: number } {
+  const noOverlays = { inputArgs: [], filterArgs: ["-vf", videoFilter], appliedCount: 0 };
+  if (!renderPlan || renderPlan.overlays.length === 0) return noOverlays;
+
+  const inputs: OverlayInput[] = [];
+  for (const overlay of renderPlan.overlays) {
+    const filePath = overlayFiles?.[overlay.assetId];
+    if (filePath) inputs.push({ overlay, filePath });
+  }
+  if (inputs.length === 0) return noOverlays;
+
+  const compiled = compileOverlayFilters({
+    overlays: inputs,
+    outputWidth: PREVIEW_WIDTH,
+    outputHeight: PREVIEW_HEIGHT,
+    baseLabel: "vbase",
+    firstInputIndex: 1,
+  });
+  if (!compiled.chain || !validateFilterGraph(compiled.chain).ok) return noOverlays;
+
+  return {
+    inputArgs: compiled.inputArgs,
+    filterArgs: [
+      "-filter_complex",
+      `[0:v]${videoFilter}[vbase];${compiled.chain}`,
+      "-map",
+      `[${compiled.outputLabel}]`,
+      "-map",
+      "0:a?",
+    ],
+    appliedCount: compiled.appliedCount,
+  };
+}
+
 export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Promise<RenderPreviewSegmentResult> {
-  const { inputMediaPath, startSec, endSec, outputPath, crop, words, renderPlan } = input;
+  const { inputMediaPath, startSec, endSec, outputPath, crop, words, renderPlan, overlayFiles } = input;
   if (!(endSec > startSec)) {
     throw new Error("endSec doit être strictement supérieur à startSec.");
   }
@@ -226,16 +278,18 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
   const subtitles = assPath ? `ass='${escapeFilterPath(assPath)}',` : "";
   const videoFilter = `${resolvedCrop.fragment},scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT},setsar=1,${subtitles}${watermark}`;
 
+  const overlays = previewOverlayArgs(videoFilter, planIsValid ? renderPlan : undefined, overlayFiles);
+
   const args = [
     "-y",
     "-ss",
     startSec.toFixed(3),
     "-i",
     inputMediaPath,
+    ...overlays.inputArgs,
     "-t",
     durationSec.toFixed(3),
-    "-vf",
-    videoFilter,
+    ...overlays.filterArgs,
     "-c:v",
     "libx264",
     "-preset",
@@ -259,6 +313,10 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
     outputPath,
     durationSec,
     assPath,
-    renderApplied: { zoom: resolvedCrop.zoomApplied, subtitles: assPath !== null },
+    renderApplied: {
+      zoom: resolvedCrop.zoomApplied,
+      subtitles: assPath !== null,
+      overlays: overlays.appliedCount,
+    },
   };
 }

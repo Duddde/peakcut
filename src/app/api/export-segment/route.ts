@@ -120,6 +120,21 @@ export function createExportSegmentHandler(
 
     const verified = await verifyExport(outputPath);
 
+    /**
+     * This route exports from a path, not from a project — it is the
+     * direct download path, and an illustration is addressed by an asset
+     * id that only a project can resolve. So a plan arriving here with
+     * illustrations exports without them, and says which route does
+     * render them, rather than leaving the caller to wonder why the
+     * picture never appeared.
+     */
+    const overlayNote =
+      (body.renderPlan?.overlays.length ?? 0) > 0
+        ? [
+            "Les illustrations ne sont pas incrustées par cette route : elles le sont à l'export d'un projet (job de rendu via /api/jobs), seul endroit où un identifiant d'image peut être rattaché à son projet.",
+          ]
+        : [];
+
     return NextResponse.json(
       {
         ok: true,
@@ -134,9 +149,10 @@ export function createExportSegmentHandler(
           zoom: exportResult.renderApplied.zoom,
           subtitle_style: exportResult.renderApplied.subtitleStyle,
           ducking: exportResult.renderApplied.ducking,
+          overlays: exportResult.renderApplied.overlays,
           template_id: exportResult.renderApplied.templateId,
         },
-        render_limitations: exportResult.renderLimitations,
+        render_limitations: [...exportResult.renderLimitations, ...overlayNote],
         exported_at: new Date().toISOString(),
         export_id: exportId,
         note: "Fichier généré côté serveur (identifié par export_id) ; aucune publication n'a été déclenchée.",

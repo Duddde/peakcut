@@ -20,6 +20,7 @@ import { Timeline } from "@/components/editor/Timeline";
 import { TranscriptEditor } from "@/components/editor/TranscriptEditor";
 import { VariantPicker } from "@/components/editor/VariantPicker";
 import { EffectsPanel } from "@/components/editor/EffectsPanel";
+import { IllustrationsPanel } from "@/components/editor/IllustrationsPanel";
 import { retimeSegment, splitSegment } from "@/lib/analysis/retimeSegment";
 import { AccountGate } from "@/components/AccountGate";
 import { PublicTrialNotice } from "@/components/PublicTrialNotice";
@@ -1429,6 +1430,22 @@ export function StudioSection({
             onReadOnlyAttempt={requireAccountForCustomization}
             onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
           />
+          {/*
+            Illustrations need a persisted project: they are stored per
+            project and addressed by an asset id the server resolves. The
+            landing-page demo has no project, so the panel is simply not
+            shown there rather than offered and then refused.
+          */}
+          {projectId && (
+            <IllustrationsPanel
+              projectId={projectId}
+              segment={selectedSegment}
+              readOnly={isPublicDemo}
+              onReadOnlyAttempt={requireAccountForCustomization}
+              onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
+              generationAvailable={!isPublicTrial && !isPublicDemo}
+            />
+          )}
           <VariantPicker
             variants={selectedSegment.variants}
             selectedVariantId={selectedVariantId}

@@ -1,3 +1,4 @@
+import { isValidAssetId } from "@/lib/assets/imageAsset";
 import {
   ATTACK_SEC_MAX,
   ATTACK_SEC_MIN,
@@ -10,7 +11,14 @@ import {
   INTENSITY_MIN,
   MARGIN_SCALE_MAX,
   MARGIN_SCALE_MIN,
+  MAX_OVERLAYS_PER_PLAN,
   MIN_CUT_DURATION_SEC,
+  MIN_OVERLAY_DURATION_SEC,
+  OVERLAY_FADE_SEC_MAX,
+  OVERLAY_FADE_SEC_MIN,
+  OVERLAY_MIN_SIZE,
+  OVERLAY_OPACITY_MAX,
+  OVERLAY_OPACITY_MIN,
   RELEASE_SEC_MAX,
   RELEASE_SEC_MIN,
   ZOOM_SCALE_MAX,
@@ -30,6 +38,70 @@ export interface RenderPlanValidationResult {
  * extreme, jarring effect into the real export — the export route must
  * call this and refuse to render anything that fails.
  */
+
+/**
+ * Overlays, checked against the same bounds the builder respects — plus
+ * two rules the others don't need. The image must sit inside the frame,
+ * because ffmpeg's `overlay` happily places a picture half outside it and
+ * the result is a clip nobody asked for. And the asset id must look like
+ * an id: it is the one field of a plan that the render turns into a
+ * filesystem lookup, so a value shaped like anything else is refused here
+ * rather than resolved there.
+ */
+function validateOverlays(
+  plan: RenderPlan,
+  minCutStart: number,
+  maxCutEnd: number,
+  errors: string[]
+): void {
+  if (plan.overlays.length > MAX_OVERLAYS_PER_PLAN) {
+    errors.push(`trop d'illustrations : ${plan.overlays.length} (maximum ${MAX_OVERLAYS_PER_PLAN}).`);
+  }
+
+  const seenIds = new Set<string>();
+  for (const overlay of plan.overlays) {
+    const at = `illustration "${overlay.id}"`;
+
+    if (seenIds.has(overlay.id)) {
+      errors.push(`${at} : identifiant en double.`);
+    }
+    seenIds.add(overlay.id);
+
+    if (!isValidAssetId(overlay.assetId)) {
+      errors.push(`${at} : assetId invalide ("${overlay.assetId}").`);
+    }
+
+    const duration = overlay.endSec - overlay.startSec;
+    if (overlay.startSec < 0) {
+      errors.push(`${at} : startSec négatif (${overlay.startSec}).`);
+    }
+    if (!(duration >= MIN_OVERLAY_DURATION_SEC)) {
+      errors.push(`${at} : durée trop courte (< ${MIN_OVERLAY_DURATION_SEC}s) : ${overlay.startSec}s–${overlay.endSec}s.`);
+    }
+    if (overlay.startSec < minCutStart || overlay.endSec > maxCutEnd) {
+      errors.push(`${at} : hors de la plage des coupes (${overlay.startSec}s–${overlay.endSec}s).`);
+    }
+
+    if (!(overlay.opacity >= OVERLAY_OPACITY_MIN && overlay.opacity <= OVERLAY_OPACITY_MAX)) {
+      errors.push(`${at} : opacité hors bornes [${OVERLAY_OPACITY_MIN}, ${OVERLAY_OPACITY_MAX}] : ${overlay.opacity}.`);
+    }
+    if (!(overlay.fadeSec >= OVERLAY_FADE_SEC_MIN && overlay.fadeSec <= OVERLAY_FADE_SEC_MAX)) {
+      errors.push(`${at} : fondu hors bornes [${OVERLAY_FADE_SEC_MIN}, ${OVERLAY_FADE_SEC_MAX}] : ${overlay.fadeSec}.`);
+    }
+    if (duration > 0 && overlay.fadeSec * 2 > duration) {
+      errors.push(`${at} : le fondu (${overlay.fadeSec}s de chaque côté) dépasse la durée de l'illustration (${duration}s).`);
+    }
+
+    const rect = overlay.rect;
+    if (!(rect.width >= OVERLAY_MIN_SIZE) || !(rect.height >= OVERLAY_MIN_SIZE)) {
+      errors.push(`${at} : trop petite pour être visible (minimum ${OVERLAY_MIN_SIZE} du cadre).`);
+    }
+    if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > 1 || rect.y + rect.height > 1) {
+      errors.push(`${at} : sort du cadre (${JSON.stringify(rect)}).`);
+    }
+  }
+}
+
 export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult {
   const errors: string[] = [];
 
@@ -97,6 +169,8 @@ export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult
       errors.push(`image clé de zoom à t=${kf.tSec}s hors de la plage des coupes.`);
     }
   }
+
+  validateOverlays(plan, minCutStart, maxCutEnd, errors);
 
   if (plan.safeZones.length === 0) {
     errors.push("safeZones ne doit pas être vide.");

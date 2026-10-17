@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildRenderPlan } from "./buildRenderPlan";
 import { validateRenderPlan } from "./validateRenderPlan";
-import type { RenderPlan } from "./types";
+import { MAX_OVERLAYS_PER_PLAN, type Overlay, type RenderPlan } from "./types";
 
 function validPlan(): RenderPlan {
   return buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 10 });
@@ -131,5 +131,91 @@ describe("validateRenderPlan", () => {
     plan.subtitleStyle.fontSizeScale = 100;
     const result = validateRenderPlan(plan);
     expect(result.errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+function overlay(patch: Partial<Overlay> = {}): Overlay {
+  return {
+    id: "ov-1",
+    assetId: "1f3b8c2a-5d4e-4f6a-9b1c-2e3d4f5a6b7c",
+    startSec: 2,
+    endSec: 6,
+    rect: { x: 0.1, y: 0.1, width: 0.8, height: 0.3 },
+    opacity: 0.95,
+    fadeSec: 0.3,
+    ...patch,
+  };
+}
+
+describe("validateRenderPlan overlays", () => {
+  it("accepts an illustration sitting inside the clip and inside the frame", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay()];
+    expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+  });
+
+  it("refuses an assetId that is not an id, because the render turns it into a file lookup", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ assetId: "../../etc/passwd" })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /assetId/.test(e))).toBe(true);
+  });
+
+  it("refuses an illustration that leaves the frame", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ rect: { x: 0.8, y: 0.1, width: 0.5, height: 0.3 } })];
+    expect(validateRenderPlan(plan).ok).toBe(false);
+  });
+
+  it("refuses an illustration outside the clip's cut range", () => {
+    const plan = validPlan();
+    plan.cuts = [{ startSec: 0, endSec: 10 }];
+    plan.overlays = [overlay({ startSec: 20, endSec: 25 })];
+    expect(validateRenderPlan(plan).ok).toBe(false);
+  });
+
+  it("refuses an illustration too brief to be seen", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ startSec: 2, endSec: 2.1, fadeSec: 0 })];
+    expect(validateRenderPlan(plan).ok).toBe(false);
+  });
+
+  it("refuses a fade longer than the illustration it fades", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ startSec: 2, endSec: 3, fadeSec: 1.4 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /fondu/i.test(e))).toBe(true);
+  });
+
+  it("refuses an opacity of zero: an invisible overlay is a mistake, not an effect", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ opacity: 0 })];
+    expect(validateRenderPlan(plan).ok).toBe(false);
+  });
+
+  it("refuses two illustrations sharing an id", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay(), overlay()];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /double/i.test(e))).toBe(true);
+  });
+
+  it("caps how many illustrations one clip can carry", () => {
+    const plan = validPlan();
+    plan.overlays = Array.from({ length: MAX_OVERLAYS_PER_PLAN + 1 }, (_, i) =>
+      overlay({ id: `ov-${i}` })
+    );
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /illustrations/i.test(e))).toBe(true);
+  });
+
+  it("accepts two illustrations overlapping in time: stacking them is a real edit", () => {
+    const plan = validPlan();
+    plan.overlays = [overlay({ id: "a" }), overlay({ id: "b", startSec: 4, endSec: 8 })];
+    expect(validateRenderPlan(plan).ok).toBe(true);
   });
 });
