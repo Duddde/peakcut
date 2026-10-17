@@ -215,12 +215,19 @@ describe("cleanup", () => {
   }
 
   it("maps a recorded path to the per-download directory, and refuses paths outside the roots", () => {
-    const roots = { downloadsBaseDir: "/srv/d", uploadsBaseDir: "/srv/u", exportsBaseDir: "/srv/e" };
-    expect(deletionTargetFor("/srv/d/abc/video.mp4", roots)).toBe("/srv/d/abc");
-    expect(deletionTargetFor("/srv/e/job.mp4", roots)).toBe("/srv/e/job.mp4");
-    expect(deletionTargetFor("/etc/passwd", roots)).toBeNull();
-    expect(deletionTargetFor("/srv/d/../../etc/passwd", roots)).toBeNull();
-    expect(deletionTargetFor("/srv/d", roots)).toBeNull();
+    // deletionTargetFor resolves its inputs, so the fixtures have to be
+    // absolute *for the host platform*: a "/srv/d" literal resolves to
+    // "A:\srv\d" on Windows and the comparison would be against a path
+    // the function never produces.
+    const abs = (...segments: string[]) => path.join(path.resolve(path.sep), ...segments);
+    const roots = { downloadsBaseDir: abs("srv", "d"), uploadsBaseDir: abs("srv", "u"), exportsBaseDir: abs("srv", "e") };
+    expect(deletionTargetFor(abs("srv", "d", "abc", "video.mp4"), roots)).toBe(abs("srv", "d", "abc"));
+    expect(deletionTargetFor(abs("srv", "e", "job.mp4"), roots)).toBe(abs("srv", "e", "job.mp4"));
+    expect(deletionTargetFor(abs("etc", "passwd"), roots)).toBeNull();
+    // Joined by hand: path.join() would normalise the "..", and what this
+    // asserts is precisely that an unnormalised escape is refused.
+    expect(deletionTargetFor([abs("srv", "d"), "..", "..", "etc", "passwd"].join(path.sep), roots)).toBeNull();
+    expect(deletionTargetFor(abs("srv", "d"), roots)).toBeNull();
   });
 
   it("deletes expired trials with their projects, jobs and files, and nothing else", async () => {

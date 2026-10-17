@@ -11,7 +11,9 @@ import type { DetectedBoundingBox, SubjectDetectionEngine, SubjectDetectionInput
  * - The command is always invoked via `spawn(command, args)` with `args`
  *   as a plain array — never through a shell, never string-concatenated,
  *   so there is no command-injection surface even though `mediaPath` is
- *   user-influenced.
+ *   user-influenced. PEAKCUT_TRACKER_ARGS is a JSON array rather than a
+ *   command line for the same reason: there is no quoting to parse, so
+ *   no way for a value to grow into an extra argument.
  * - The spawned process receives a minimal, explicit environment (just
  *   PATH) rather than inheriting the parent's full environment, so it can
  *   never read PeakCut's own API keys or other secrets.
@@ -25,6 +27,13 @@ export class TrackerCommandNotConfiguredError extends Error {
       "Aucun moteur de détection externe n'est configuré : définissez PEAKCUT_TRACKER_COMMAND pour en activer un."
     );
     this.name = "TrackerCommandNotConfiguredError";
+  }
+}
+
+export class TrackerCommandInvalidArgsError extends Error {
+  constructor(reason: string) {
+    super(`PEAKCUT_TRACKER_ARGS est invalide : ${reason}`);
+    this.name = "TrackerCommandInvalidArgsError";
   }
 }
 
@@ -52,10 +61,42 @@ export class TrackerCommandInvalidOutputError extends Error {
 export interface CommandSubjectDetectionEngineOptions {
   /** Overrides process.env.PEAKCUT_TRACKER_COMMAND — mainly for tests. */
   command?: string;
+  /** Overrides process.env.PEAKCUT_TRACKER_ARGS — mainly for tests. */
+  args?: string[];
   timeoutMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+/**
+ * Fixed arguments inserted before the media arguments, as a JSON array of
+ * strings.
+ *
+ * Interpreters need them: a tracker written in Python or Node is not an
+ * executable file, it is an argument to one, so the command alone cannot
+ * express `python tracker.py`. On POSIX a shebang plus `chmod +x` hides
+ * that, but on Windows nothing does — a `.cmd` wrapper is refused by
+ * `spawn()` without a shell (Node's CVE-2024-27980 fix), so without this
+ * the whole external-engine option is unreachable there.
+ *
+ * Like PEAKCUT_TRACKER_COMMAND, this holds paths and flags, never a secret:
+ * the spawned process is given PATH and nothing else.
+ */
+function configuredArgs(raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new TrackerCommandInvalidArgsError(
+      'attendu un tableau JSON de chaînes, par exemple ["C:/chemin/tracker.py"].'
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new TrackerCommandInvalidArgsError("attendu un tableau JSON ne contenant que des chaînes.");
+  }
+  return parsed as string[];
+}
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -120,6 +161,7 @@ export class CommandSubjectDetectionEngine implements SubjectDetectionEngine {
 
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const args = [
+      ...(this.options.args ?? configuredArgs(process.env.PEAKCUT_TRACKER_ARGS)),
       input.mediaPath,
       String(input.sourceWidth),
       String(input.sourceHeight),
