@@ -6,13 +6,20 @@ import {
   DUCK_DB_MIN,
   FONT_SIZE_SCALE_MAX,
   FONT_SIZE_SCALE_MIN,
+  FRAMING_LABEL_MAX_LENGTH,
+  FRAMING_MIN_SIZE,
+  FRAMING_SHOT_SOURCES,
+  FRAMING_TRANSITION_SEC_MAX,
+  FRAMING_TRANSITION_SEC_MIN,
   HEX_COLOR_PATTERN,
   INTENSITY_MAX,
   INTENSITY_MIN,
   MARGIN_SCALE_MAX,
   MARGIN_SCALE_MIN,
+  MAX_FRAMING_SHOTS_PER_PLAN,
   MAX_OVERLAYS_PER_PLAN,
   MIN_CUT_DURATION_SEC,
+  MIN_FRAMING_SHOT_DURATION_SEC,
   MIN_OVERLAY_DURATION_SEC,
   OVERLAY_FADE_SEC_MAX,
   OVERLAY_FADE_SEC_MIN,
@@ -102,6 +109,86 @@ function validateOverlays(
   }
 }
 
+/**
+ * Framing shots, checked against the same bounds the detector and the
+ * studio respect.
+ *
+ * Two rules here are not about taste. Shots must not overlap, because
+ * the compiled crop expression resolves time to exactly one rectangle
+ * and an overlap would make which one win an accident of branch order.
+ * And a shot's rectangle must fit inside the source frame: ffmpeg's
+ * `crop` clamps a rectangle that falls outside, so an out-of-frame shot
+ * would render a frame nobody chose instead of failing.
+ */
+function validateFraming(
+  plan: RenderPlan,
+  minCutStart: number,
+  maxCutEnd: number,
+  errors: string[]
+): void {
+  if (plan.framing.length > MAX_FRAMING_SHOTS_PER_PLAN) {
+    errors.push(`trop de plans de cadrage : ${plan.framing.length} (maximum ${MAX_FRAMING_SHOTS_PER_PLAN}).`);
+  }
+
+  const seenIds = new Set<string>();
+  for (const shot of plan.framing) {
+    const at = `plan de cadrage "${shot.id}"`;
+
+    if (seenIds.has(shot.id)) {
+      errors.push(`${at} : identifiant en double.`);
+    }
+    seenIds.add(shot.id);
+
+    if (!FRAMING_SHOT_SOURCES.includes(shot.source)) {
+      errors.push(`${at} : source inconnue ("${shot.source}").`);
+    }
+    if (shot.label !== null && shot.label.length > FRAMING_LABEL_MAX_LENGTH) {
+      errors.push(`${at} : libellé trop long (maximum ${FRAMING_LABEL_MAX_LENGTH} caractères).`);
+    }
+
+    const duration = shot.endSec - shot.startSec;
+    if (shot.startSec < 0) {
+      errors.push(`${at} : startSec négatif (${shot.startSec}).`);
+    }
+    if (!(duration >= MIN_FRAMING_SHOT_DURATION_SEC)) {
+      errors.push(
+        `${at} : durée trop courte (< ${MIN_FRAMING_SHOT_DURATION_SEC}s) : ${shot.startSec}s–${shot.endSec}s.`
+      );
+    }
+    if (shot.startSec < minCutStart || shot.endSec > maxCutEnd) {
+      errors.push(`${at} : hors de la plage des coupes (${shot.startSec}s–${shot.endSec}s).`);
+    }
+
+    if (
+      !(shot.transitionSec >= FRAMING_TRANSITION_SEC_MIN && shot.transitionSec <= FRAMING_TRANSITION_SEC_MAX)
+    ) {
+      errors.push(
+        `${at} : transition hors bornes [${FRAMING_TRANSITION_SEC_MIN}, ${FRAMING_TRANSITION_SEC_MAX}] : ${shot.transitionSec}.`
+      );
+    }
+    if (duration > 0 && shot.transitionSec > duration) {
+      errors.push(`${at} : la transition (${shot.transitionSec}s) dépasse la durée du plan (${duration}s).`);
+    }
+
+    const rect = shot.rect;
+    if (!(rect.width >= FRAMING_MIN_SIZE) || !(rect.height >= FRAMING_MIN_SIZE)) {
+      errors.push(`${at} : fenêtre de cadrage trop petite (minimum ${FRAMING_MIN_SIZE} de la source).`);
+    }
+    if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > 1 || rect.y + rect.height > 1) {
+      errors.push(`${at} : sort du cadre source (${JSON.stringify(rect)}).`);
+    }
+  }
+
+  const sorted = [...plan.framing].sort((a, b) => a.startSec - b.startSec);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].startSec < sorted[i - 1].endSec) {
+      errors.push(
+        `plans de cadrage qui se chevauchent : "${sorted[i - 1].id}" (${sorted[i - 1].startSec}s–${sorted[i - 1].endSec}s) / "${sorted[i].id}" (${sorted[i].startSec}s–${sorted[i].endSec}s).`
+      );
+    }
+  }
+}
+
 export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult {
   const errors: string[] = [];
 
@@ -171,6 +258,7 @@ export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult
   }
 
   validateOverlays(plan, minCutStart, maxCutEnd, errors);
+  validateFraming(plan, minCutStart, maxCutEnd, errors);
 
   if (plan.safeZones.length === 0) {
     errors.push("safeZones ne doit pas être vide.");

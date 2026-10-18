@@ -25,6 +25,14 @@ export interface FrameTrack {
   fallbackUsed: boolean;
   /** Identifies the method that produced this track, for transparency (e.g. "centered-fallback-no-face-model"). */
   method: string;
+  /**
+   * Every subject the detection saw, not just the one the keyframes
+   * follow. A single centered path cannot express "two people, and the
+   * frame should be on whoever is talking"; this is what makes that
+   * possible downstream (see buildSpeakerFraming). Absent on trackers
+   * that have no notion of separate subjects.
+   */
+  subjects?: SubjectTrack[];
 }
 
 export interface FrameTrackerInput {
@@ -55,6 +63,34 @@ export interface DetectedBoundingBox {
   score: number;
   /** Stable identity across frames, if the engine supports it. */
   trackId?: string;
+  /**
+   * How much this subject's mouth region moved around this timestamp, in
+   * [0, 1], for engines that measure it (see scripts/vision/track_faces.py).
+   *
+   * Undefined means "not measured", and that is deliberately not the same
+   * value as 0: a face reported as perfectly still is evidence that it is
+   * not the one speaking, while a face whose motion nobody measured is no
+   * evidence at all. Conflating the two would let an engine that reports
+   * nothing decide who the active speaker is.
+   */
+  activity?: number;
+}
+
+/**
+ * One subject followed across time: the same face, from the frame it
+ * appears in to the frame it leaves.
+ *
+ * Detection engines report independent boxes per sampled frame; which of
+ * them are the same person is inferred afterwards (see
+ * groupSubjectTracks) or taken from the engine when it supplies
+ * `trackId`. Everything that reasons about *who* is in frame — matching a
+ * voice to a face, framing a shot on one of two people — needs this, not
+ * a flat list of boxes.
+ */
+export interface SubjectTrack {
+  id: string;
+  /** Chronological, one box per sampled timestamp at most. */
+  boxes: DetectedBoundingBox[];
 }
 
 export interface SubjectDetectionInput {

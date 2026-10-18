@@ -277,6 +277,68 @@ describe("parseSegmentInput — plan d'effets", () => {
     }
   });
 
+  it("accepts a plan whose crop follows the speaker", () => {
+    const framing = [
+      {
+        id: "shot-1",
+        startSec: 0,
+        endSec: 30,
+        rect: { x: 0.05, y: 0, width: 0.5625, height: 1 },
+        transitionSec: 0,
+        source: "speaker",
+        label: "Intervenant A",
+      },
+      {
+        id: "shot-2",
+        startSec: 30,
+        endSec: 60,
+        rect: { x: 0.39, y: 0, width: 0.5625, height: 1 },
+        transitionSec: 0.2,
+        source: "manual",
+        label: null,
+      },
+    ];
+    const parsed = parseSegmentInput(segmentWith({ ...validPlan, framing }));
+    expect(parsed.renderPlan?.framing).toHaveLength(2);
+    expect(parsed.renderPlan?.framing[1].label).toBeNull();
+    expect(parsed.renderPlan?.framing[1].source).toBe("manual");
+  });
+
+  it("treats a plan saved before framing existed as a plan with one static crop", () => {
+    const { framing: _omitted, ...beforeFraming } = validPlan;
+    expect(parseSegmentInput(segmentWith(beforeFraming)).renderPlan?.framing).toEqual([]);
+  });
+
+  it("refuses an unknown framing source", () => {
+    const framing = [
+      {
+        id: "shot-1",
+        startSec: 0,
+        endSec: 30,
+        rect: { x: 0.05, y: 0, width: 0.5625, height: 1 },
+        transitionSec: 0,
+        source: "ia-magique",
+        label: null,
+      },
+    ];
+    expect(() => parseSegmentInput(segmentWith({ ...validPlan, framing }))).toThrow(ProjectInputParseError);
+  });
+
+  it("refuses a framing window that leaves the source frame", () => {
+    const framing = [
+      {
+        id: "shot-1",
+        startSec: 0,
+        endSec: 30,
+        rect: { x: 0.8, y: 0, width: 0.5625, height: 1 },
+        transitionSec: 0,
+        source: "speaker",
+        label: null,
+      },
+    ];
+    expect(() => parseSegmentInput(segmentWith({ ...validPlan, framing }))).toThrow(ProjectInputParseError);
+  });
+
   it("never takes the limitations from the client: what the export cannot do is the server's word", () => {
     const parsed = parseSegmentInput(
       segmentWith({ ...validPlan, limitations: ["PeakCut fait absolument tout"] })

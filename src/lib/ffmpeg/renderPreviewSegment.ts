@@ -64,7 +64,7 @@ export interface RenderPreviewSegmentResult {
   /** Written only when captions were burned in; the caller owns cleanup, as with exportSegment. */
   assPath: string | null;
   /** What of the plan actually made it into this preview. */
-  renderApplied: { zoom: boolean; subtitles: boolean; overlays: number };
+  renderApplied: { zoom: boolean; subtitles: boolean; overlays: number; framing: number };
 }
 
 function escapeDrawtext(text: string): string {
@@ -182,16 +182,27 @@ function runFfmpeg(args: string[]): Promise<void> {
 function previewCropFragment(
   crop: NormalizedRect | undefined,
   renderPlan: RenderPlan | undefined
-): { fragment: string; zoomApplied: boolean } {
+): { fragment: string; zoomApplied: boolean; framingApplied: number } {
   if (!renderPlan || !crop || !validateRenderPlan(renderPlan).ok) {
-    return { fragment: cropFragment(crop), zoomApplied: false };
+    return { fragment: cropFragment(crop), zoomApplied: false, framingApplied: 0 };
   }
-  const compiled = compileZoomFilter({ baseCrop: crop, zoomKeyframes: renderPlan.zoomKeyframes });
+  const compiled = compileZoomFilter({
+    baseCrop: crop,
+    zoomKeyframes: renderPlan.zoomKeyframes,
+    // A preview that framed the clip differently from the export would be
+    // worse than no preview: whoever is speaking has to be in frame here
+    // too, at the same moments.
+    framing: renderPlan.framing,
+  });
   const candidate = `${compiled.filterFragment},scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT}`;
   if (!validateFilterGraph(candidate).ok) {
-    return { fragment: cropFragment(crop), zoomApplied: false };
+    return { fragment: cropFragment(crop), zoomApplied: false, framingApplied: 0 };
   }
-  return { fragment: compiled.filterFragment, zoomApplied: compiled.zoomApplied };
+  return {
+    fragment: compiled.filterFragment,
+    zoomApplied: compiled.zoomApplied,
+    framingApplied: compiled.framingApplied,
+  };
 }
 
 /**
@@ -317,6 +328,7 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
       zoom: resolvedCrop.zoomApplied,
       subtitles: assPath !== null,
       overlays: overlays.appliedCount,
+      framing: resolvedCrop.framingApplied,
     },
   };
 }

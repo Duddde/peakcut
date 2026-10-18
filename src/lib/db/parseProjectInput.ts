@@ -1,7 +1,13 @@
 import { parseWorkflowState } from "@/lib/workflow/parseWorkflowState";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
 import { COMMON_LIMITATIONS } from "@/lib/effects/buildRenderPlan";
-import { EFFECT_TEMPLATE_IDS, type EffectTemplateId, type RenderPlan } from "@/lib/effects/types";
+import {
+  EFFECT_TEMPLATE_IDS,
+  FRAMING_SHOT_SOURCES,
+  type EffectTemplateId,
+  type FramingShotSource,
+  type RenderPlan,
+} from "@/lib/effects/types";
 import type {
   Project,
   ProjectStatus,
@@ -183,6 +189,33 @@ function parseRenderPlanInput(raw: unknown, field: string): RenderPlan | null {
         endSec: num(o.endSec, `${at}.endSec`),
         opacity: num(o.opacity, `${at}.opacity`),
         fadeSec: num(o.fadeSec, `${at}.fadeSec`),
+        rect: {
+          x: num(rect.x, `${at}.rect.x`),
+          y: num(rect.y, `${at}.rect.y`),
+          width: num(rect.width, `${at}.rect.width`),
+          height: num(rect.height, `${at}.rect.height`),
+        },
+      };
+    }),
+    // Absent on every plan saved before the crop could follow a speaker,
+    // which must keep loading: no shots is a clip with one static crop.
+    framing: arr(p.framing ?? [], `${field}.framing`).map((rawShot, i) => {
+      const at = `${field}.framing[${i}]`;
+      const f = obj(rawShot, at);
+      const rect = obj(f.rect, `${at}.rect`);
+      const source = str(f.source, `${at}.source`);
+      if (!FRAMING_SHOT_SOURCES.includes(source as FramingShotSource)) {
+        throw new ProjectInputParseError(
+          `${at}.source doit être l'un de : ${FRAMING_SHOT_SOURCES.join(", ")}.`
+        );
+      }
+      return {
+        id: str(f.id, `${at}.id`),
+        startSec: num(f.startSec, `${at}.startSec`),
+        endSec: num(f.endSec, `${at}.endSec`),
+        transitionSec: num(f.transitionSec, `${at}.transitionSec`),
+        source: source as FramingShotSource,
+        label: f.label === null || f.label === undefined ? null : str(f.label, `${at}.label`),
         rect: {
           x: num(rect.x, `${at}.rect.x`),
           y: num(rect.y, `${at}.rect.y`),

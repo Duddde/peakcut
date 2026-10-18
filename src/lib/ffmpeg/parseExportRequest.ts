@@ -1,6 +1,6 @@
 import type { NormalizedRect, SafeZone, TranscriptWord, WorkflowState } from "@/lib/domain/types";
 import { parseWorkflowState } from "@/lib/workflow/parseWorkflowState";
-import { EFFECT_TEMPLATE_IDS, type RenderPlan } from "@/lib/effects/types";
+import { EFFECT_TEMPLATE_IDS, type FramingShot, type RenderPlan } from "@/lib/effects/types";
 
 export class ExportRequestParseError extends Error {
   constructor(message: string) {
@@ -141,6 +141,29 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     };
   });
 
+  // Same for the framing shots: a plan saved before the crop could follow
+  // a speaker has none, which means one static crop — not a malformed
+  // plan. `source` is read as a plain string here and checked against the
+  // known list by validateRenderPlan, with every other bound.
+  const framing = requireArray(plan.framing ?? [], "framing").map((raw, index) => {
+    const f = requireObject(raw, `framing[${index}]`);
+    const rect = requireObject(f.rect, `framing[${index}].rect`);
+    return {
+      id: requireString(f.id, `framing[${index}].id`),
+      startSec: requireNumber(f.startSec, `framing[${index}].startSec`),
+      endSec: requireNumber(f.endSec, `framing[${index}].endSec`),
+      transitionSec: requireNumber(f.transitionSec, `framing[${index}].transitionSec`),
+      source: requireString(f.source, `framing[${index}].source`) as FramingShot["source"],
+      label: f.label === null || f.label === undefined ? null : requireString(f.label, `framing[${index}].label`),
+      rect: {
+        x: requireNumber(rect.x, `framing[${index}].rect.x`),
+        y: requireNumber(rect.y, `framing[${index}].rect.y`),
+        width: requireNumber(rect.width, `framing[${index}].rect.width`),
+        height: requireNumber(rect.height, `framing[${index}].rect.height`),
+      },
+    };
+  });
+
   const styleRaw = requireObject(plan.subtitleStyle, "subtitleStyle");
   const subtitleStyle = {
     fontSizeScale: requireNumber(styleRaw.fontSizeScale, "subtitleStyle.fontSizeScale"),
@@ -183,6 +206,7 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     cuts,
     zoomKeyframes,
     overlays,
+    framing,
     subtitleStyle,
     safeZones,
     audioDucking,

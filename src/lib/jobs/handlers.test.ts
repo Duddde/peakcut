@@ -17,7 +17,7 @@ import { SqliteJobRepository } from "./JobRepository";
 import { TranscriptProviderNotConfiguredError } from "@/lib/transcript/TranscriptProvider";
 import type { TranscriptProvider } from "@/lib/transcript/TranscriptProvider";
 import { VideoDownloadError, type VideoDownloader, type VideoDownloadResult } from "@/lib/youtube/videoDownloader";
-import type { Project, Segment } from "@/lib/domain/types";
+import type { Project, Segment, TranscriptWord } from "@/lib/domain/types";
 import type { FrameTracker, FrameTrack } from "@/lib/tracking/types";
 import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
@@ -594,6 +594,145 @@ describe("createDefaultJobHandlers", () => {
       const verticalVariant = persisted?.segments[0].variants.find((v) => v.aspectRatio === "9:16");
       // cx = 0.8 should shift the crop window to the right of a plain centered crop.
       expect(verticalVariant?.crop.x).toBeGreaterThan(0);
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+      await rm(workDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  /**
+   * Two faces, one of which moves its mouth while each voice is talking:
+   * the one case where a clip can really be framed on the speaker. The
+   * detection is faked (a real Haar cascade on a synthetic video would
+   * detect nothing), but everything downstream of it is the real code
+   * path — matching, shot building, bounds, persistence.
+   */
+  it("tracking frames the clip on whoever is speaking and saves the shots onto the plan", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const workDir = await mkdtemp(path.join(tmpdir(), "peakcut-handlers-framing-"));
+    try {
+      const sourcePath = path.join(workDir, "source.mp4");
+      await createSyntheticVideo(sourcePath, 3);
+
+      const words: TranscriptWord[] = [];
+      for (let t = 0; t < 60; t++) {
+        words.push({
+          text: t % 2 === 0 ? "oui" : "non",
+          startSec: t,
+          endSec: t + 0.9,
+          speaker: t < 30 ? "A" : "B",
+          confidence: 0.9,
+        });
+      }
+
+      const segment = {
+        ...makeSegment("seg-1", 0, 60),
+        words,
+        renderPlan: buildRenderPlan("speaker-focus", { segmentId: "seg-1", segmentDurationSec: 60 }),
+      };
+      const project = baseProject({
+        segments: [segment],
+        transcript: { language: "fr", words, providerId: "fake" },
+        source: { ...baseProject().source, localFilePath: sourcePath, durationSec: 60 },
+      });
+      projects.createProject(owner.id, project);
+
+      const boxes = (x: number, speaking: (tSec: number) => boolean) =>
+        Array.from({ length: 60 }, (_, tSec) => ({
+          tSec,
+          x,
+          y: 0.3,
+          width: 0.12,
+          height: 0.2,
+          score: 0.9,
+          activity: speaking(tSec) ? 0.06 : 0.003,
+        }));
+
+      const track: FrameTrack = {
+        keyframes: [{ tSec: 0, cx: 0.5, cy: 0.5, confidence: 0.9 }],
+        fallbackUsed: false,
+        method: "fake-real-detector",
+        subjects: [
+          { id: "s1", boxes: boxes(0.1, (t) => t < 30) },
+          { id: "s2", boxes: boxes(0.75, (t) => t >= 30) },
+        ],
+      };
+
+      const handlers = createDefaultJobHandlers({
+        db,
+        exportsBaseDir,
+        trackerFactory: () => makeFakeTracker(track),
+      });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "tracking", payload: { provider: "local-subject" }, now: "2026-01-01T00:00:00.000Z" });
+      const claimed = jobs.claimNextJob()!;
+      const result = (await handlers.tracking({ job: claimed, reportProgress: () => {} })) as {
+        speakerFraming: { assignedSpeakers: number; framedSegments: number; reasons: string[] };
+        track: FrameTrack;
+      };
+
+      expect(result.speakerFraming.assignedSpeakers).toBe(2);
+      expect(result.speakerFraming.framedSegments).toBe(1);
+      // The boxes themselves stay out of the stored result.
+      expect(result.track.subjects).toBeUndefined();
+
+      const persisted = projects.getProjectById(project.id);
+      const framing = persisted!.segments[0].renderPlan!.framing;
+      expect(framing).toHaveLength(2);
+      expect(framing[0].source).toBe("speaker");
+      expect(framing[0].startSec).toBe(0);
+      expect(framing[1].endSec).toBe(60);
+      // The first speaker is the left face, the second the right one.
+      expect(framing[0].rect.x).toBeLessThan(framing[1].rect.x);
+      expect(validateRenderPlan(persisted!.segments[0].renderPlan!)).toEqual({ ok: true, errors: [] });
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+      await rm(workDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("tracking says why the clip is not framed on the speaker rather than leaving it unexplained", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const workDir = await mkdtemp(path.join(tmpdir(), "peakcut-handlers-noframing-"));
+    try {
+      const sourcePath = path.join(workDir, "source.mp4");
+      await createSyntheticVideo(sourcePath, 3);
+
+      const segment = {
+        ...makeSegment("seg-1", 0, 2),
+        renderPlan: buildRenderPlan("speaker-focus", { segmentId: "seg-1", segmentDurationSec: 2 }),
+      };
+      // No transcript: nothing says who talks when.
+      const project = baseProject({
+        segments: [segment],
+        source: { ...baseProject().source, localFilePath: sourcePath },
+      });
+      projects.createProject(owner.id, project);
+
+      const track: FrameTrack = {
+        keyframes: [{ tSec: 0, cx: 0.5, cy: 0.5, confidence: 0.9 }],
+        fallbackUsed: false,
+        method: "fake-real-detector",
+        subjects: [],
+      };
+      const handlers = createDefaultJobHandlers({
+        db,
+        exportsBaseDir,
+        trackerFactory: () => makeFakeTracker(track),
+      });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "tracking", payload: { provider: "local-subject" }, now: "2026-01-01T00:00:00.000Z" });
+      const claimed = jobs.claimNextJob()!;
+      const result = (await handlers.tracking({ job: claimed, reportProgress: () => {} })) as {
+        speakerFraming: { assignedSpeakers: number; framedSegments: number; reasons: string[] };
+      };
+
+      expect(result.speakerFraming.assignedSpeakers).toBe(0);
+      expect(result.speakerFraming.framedSegments).toBe(0);
+      expect(result.speakerFraming.reasons.join(" ")).toMatch(/transcription/i);
+
+      const persisted = projects.getProjectById(project.id);
+      expect(persisted!.segments[0].renderPlan!.framing).toEqual([]);
     } finally {
       await rm(exportsBaseDir, { recursive: true, force: true });
       await rm(workDir, { recursive: true, force: true });

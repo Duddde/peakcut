@@ -37,14 +37,24 @@ function interpolateCenter(track: FrameTrack, atSec: number): { cx: number; cy: 
   return { cx: last.cx, cy: last.cy };
 }
 
+export interface CropRectParams {
+  targetAspect: number;
+  sourceWidth: number;
+  sourceHeight: number;
+}
+
 /**
- * Computes the normalized crop rectangle (relative to the source frame) at
- * a given time, following the tracked center and clamped to stay entirely
- * within the [0,1] frame bounds.
+ * The largest rectangle of the given aspect ratio that fits in the source
+ * frame, centered on a point and pushed back inside the frame when that
+ * point is near an edge.
+ *
+ * Shared with the shot-by-shot framing (buildSpeakerFraming) so that a
+ * clip whose crop follows the speaker and a clip with one static crop are
+ * cut from the source exactly the same way — a shot is a different centre,
+ * never a different window.
  */
-export function deriveCropFromTrack(track: FrameTrack, params: DeriveCropParams): NormalizedRect {
-  const { targetAspect, sourceWidth, sourceHeight, atSec } = params;
-  const { cx, cy } = interpolateCenter(track, atSec);
+export function cropRectAround(cx: number, cy: number, params: CropRectParams): NormalizedRect {
+  const { targetAspect, sourceWidth, sourceHeight } = params;
   const sourceAspect = sourceWidth / sourceHeight;
 
   let width: number;
@@ -61,4 +71,15 @@ export function deriveCropFromTrack(track: FrameTrack, params: DeriveCropParams)
   const y = Math.min(Math.max(cy - height / 2, 0), 1 - height);
 
   return { x, y, width, height };
+}
+
+/**
+ * Computes the normalized crop rectangle (relative to the source frame) at
+ * a given time, following the tracked center and clamped to stay entirely
+ * within the [0,1] frame bounds.
+ */
+export function deriveCropFromTrack(track: FrameTrack, params: DeriveCropParams): NormalizedRect {
+  const { targetAspect, sourceWidth, sourceHeight, atSec } = params;
+  const { cx, cy } = interpolateCenter(track, atSec);
+  return cropRectAround(cx, cy, { targetAspect, sourceWidth, sourceHeight });
 }

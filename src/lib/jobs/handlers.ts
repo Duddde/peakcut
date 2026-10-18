@@ -21,6 +21,10 @@ import { StableCenterFrameTracker } from "@/lib/tracking/StableCenterFrameTracke
 import { LocalSubjectTracker } from "@/lib/tracking/LocalSubjectTracker";
 import { AutoSubjectDetectionEngine } from "@/lib/tracking/AutoSubjectDetectionEngine";
 import { deriveCropFromTrack } from "@/lib/tracking/deriveCropFromTrack";
+import { assignSpeakersToFaces } from "@/lib/tracking/assignSpeakersToFaces";
+import { buildSpeakerFraming } from "@/lib/tracking/buildSpeakerFraming";
+import { speechTurnsFromWords } from "@/lib/tracking/speechTurns";
+import { EXPORT_HEIGHT, EXPORT_WIDTH } from "@/lib/ffmpeg/exportSpec";
 import type { FrameTracker } from "@/lib/tracking/types";
 import { downloadYoutubeVideo } from "@/lib/youtube/downloadYoutubeVideo";
 import {
@@ -307,17 +311,73 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
 
     const sourceWidth = probed.width ?? 1920;
     const sourceHeight = probed.height ?? 1080;
+
+    /**
+     * Matching each voice to a face, once for the whole video rather than
+     * per clip: a speaker is the same person throughout, and the
+     * detection samples of one 60-second clip are rarely enough to tell
+     * two faces apart. The result is then applied clip by clip below.
+     *
+     * `reasons` is kept and returned even when it is the only output —
+     * "no shots, and here is why" is the answer a user needs when their
+     * clip is not framed on the speaker, and it is the one thing a
+     * silent fallback would never tell them.
+     */
+    const subjects = track.subjects ?? [];
+    const turns = project.transcript ? speechTurnsFromWords(project.transcript.words) : [];
+    const assignment =
+      subjects.length > 0 && turns.length > 0
+        ? assignSpeakersToFaces(subjects, turns)
+        : {
+            bySpeaker: {},
+            reasons: [
+              project.transcript
+                ? "Aucun sujet suivi dans la détection : le cadrage ne peut pas suivre le locuteur."
+                : "Aucune transcription diarisée sur ce projet : sans savoir qui parle quand, le cadrage ne peut pas suivre le locuteur. Lancez un job de transcription.",
+            ],
+          };
+
+    const framingNotes: string[] = [];
+    let framedSegments = 0;
+
     let updatedSegments: Segment[] | null = null;
     if (project.segments.length > 0) {
       updatedSegments = project.segments.map((segment) => {
         const atSec = segment.startSec + (segment.endSec - segment.startSec) / 2;
+        const variants = segment.variants.map((variant) => {
+          const [w, h] = variant.aspectRatio.split(":").map(Number);
+          const crop = deriveCropFromTrack(track, { targetAspect: w / h, sourceWidth, sourceHeight, atSec });
+          return { ...variant, crop };
+        });
+
+        // Shots are sized for what the export actually produces (a
+        // 1080x1920 clip), not for the variant that happens to be first:
+        // a variant is a different crop of the source, the export is one
+        // vertical frame either way.
+        const framing =
+          segment.renderPlan && Object.keys(assignment.bySpeaker).length > 0
+            ? buildSpeakerFraming({
+                tracks: subjects,
+                turns,
+                assignment,
+                clipStartSec: segment.startSec,
+                clipEndSec: segment.endSec,
+                targetAspect: EXPORT_WIDTH / EXPORT_HEIGHT,
+                sourceWidth,
+                sourceHeight,
+              })
+            : null;
+
+        if (framing) {
+          framingNotes.push(...framing.notes.map((note) => `${segment.id} : ${note}`));
+          if (framing.shots.length > 0) framedSegments++;
+        }
+
         return {
           ...segment,
-          variants: segment.variants.map((variant) => {
-            const [w, h] = variant.aspectRatio.split(":").map(Number);
-            const crop = deriveCropFromTrack(track, { targetAspect: w / h, sourceWidth, sourceHeight, atSec });
-            return { ...variant, crop };
-          }),
+          variants,
+          renderPlan:
+            segment.renderPlan && framing ? { ...segment.renderPlan, framing: framing.shots } : segment.renderPlan,
         };
       });
       if (job.projectId) {
@@ -329,7 +389,25 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       }
     }
 
-    return { providerId, track, appliedToSegments: updatedSegments !== null };
+    // The subjects' boxes stay out of the stored result: one per face
+    // per sampled second of a long video is a lot of JSON, and it is an
+    // intermediate measurement nobody downstream acts on. What came of
+    // it — the shots, and the reasons when there are none — is reported
+    // instead, and the keyframes are still there exactly as before.
+    const { subjects: _subjects, ...trackForResult } = track;
+
+    return {
+      providerId,
+      track: trackForResult,
+      subjectsDetected: subjects.length,
+      appliedToSegments: updatedSegments !== null,
+      speakerFraming: {
+        assignedSpeakers: Object.keys(assignment.bySpeaker).length,
+        framedSegments,
+        reasons: assignment.reasons,
+        notes: framingNotes,
+      },
+    };
   };
 
   const render: JobHandler = async ({ job, reportProgress }) => {

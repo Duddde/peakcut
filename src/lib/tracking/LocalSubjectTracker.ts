@@ -1,4 +1,5 @@
 import { assertLocalFileExists } from "@/lib/transcript/transcriptHttp";
+import { groupSubjectTracks } from "./subjectTracks";
 import type {
   DetectedBoundingBox,
   FrameTrack,
@@ -136,6 +137,7 @@ export class LocalSubjectTracker implements FrameTracker {
         })),
         fallbackUsed: true,
         method: "local-subject-no-detections-fallback",
+        subjects: [],
       };
     }
 
@@ -176,6 +178,15 @@ export class LocalSubjectTracker implements FrameTracker {
       confidence: p.confidence,
     }));
 
-    return { keyframes, fallbackUsed: false, method: "local-subject-detection" };
+    return {
+      keyframes,
+      fallbackUsed: false,
+      method: "local-subject-detection",
+      // The keyframes follow one subject; this keeps all of them, which is
+      // what framing a clip on whoever is speaking needs (see
+      // buildSpeakerFraming). Grouping happens here rather than in the
+      // caller because this is the only layer that sees every detection.
+      subjects: groupSubjectTracks(detections),
+    };
   }
 }

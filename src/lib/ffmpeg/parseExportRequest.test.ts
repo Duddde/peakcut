@@ -170,3 +170,54 @@ function validRenderPlan() {
     limitations: ["Le zoom animé n'est pas encore appliqué image par image."],
   };
 }
+
+describe("parseExportRequestBody — cadrage par plans", () => {
+  const shots = [
+    {
+      id: "shot-1",
+      startSec: 0,
+      endSec: 2,
+      rect: { x: 0.05, y: 0, width: 0.5625, height: 1 },
+      transitionSec: 0,
+      source: "speaker",
+      label: "Intervenant A",
+    },
+    {
+      id: "shot-2",
+      startSec: 2,
+      endSec: 4,
+      rect: { x: 0.39, y: 0, width: 0.5625, height: 1 },
+      transitionSec: 0.2,
+      source: "manual",
+      label: null,
+    },
+  ];
+
+  it("parses the shots a clip's crop follows", () => {
+    const result = parseExportRequestBody({
+      ...valid(),
+      renderPlan: { ...validRenderPlan(), framing: shots },
+    });
+    expect(result.renderPlan?.framing).toHaveLength(2);
+    expect(result.renderPlan?.framing[0].rect.x).toBe(0.05);
+    expect(result.renderPlan?.framing[1].label).toBeNull();
+  });
+
+  it("treats a plan without framing as a plan with one static crop", () => {
+    const result = parseExportRequestBody({ ...valid(), renderPlan: validRenderPlan() });
+    expect(result.renderPlan?.framing).toEqual([]);
+  });
+
+  it("throws when a shot is structurally broken", () => {
+    for (const broken of [
+      [{ ...shots[0], rect: undefined }],
+      [{ ...shots[0], startSec: "tout de suite" }],
+      [{ ...shots[0], id: 3 }],
+      "plein de plans",
+    ]) {
+      expect(() =>
+        parseExportRequestBody({ ...valid(), renderPlan: { ...validRenderPlan(), framing: broken } })
+      ).toThrow(ExportRequestParseError);
+    }
+  });
+});

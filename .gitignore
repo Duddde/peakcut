@@ -50,3 +50,7 @@ next-env.d.ts
 
 # venv optionnel de detection de visage (jamais commite)
 /.venv-vision/
+
+# caches Python (tests de scripts/vision)
+__pycache__/
+*.pyc

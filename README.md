@@ -15,6 +15,7 @@ PeakCut est un MVP de repurposing vidéo orienté Shorts. Il transforme un proje
 - Montage par clip, modifiable : zoom animé et style de sous-titres compilés réellement par l’export, et éditables dans le studio.
 - Timeline éditable : clips placés à leur vraie position, rognage à la souris ou au clavier, découpe et suppression — avec re-découpage des sous-titres, re-score et réajustement des effets.
 - Illustrations par clip : image importée ou générée par IA, placée et minutée dans le studio, réellement incrustée par l'export et par l'aperçu.
+- Cadrage qui suit celui qui parle : chaque prise de parole diarisée est rapprochée du visage dont la bouche bouge, et le cadre change de plan en plan — réellement compilé par l’export et par l’aperçu, et modifiable dans le studio.
 - Éditeur de démonstration : segments, timeline, texte et mots éditables, cadrage et safe zones pour les variantes 9:16, 1:1, 4:5 et 16:9.
 - Export FFmpeg réel depuis le fichier média du projet (import local ou vidéo YouTube téléchargée) : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot et vérification ffprobe.
 - Validation humaine par défaut ; aucune publication YouTube/TikTok n’est implémentée dans ce MVP.
@@ -100,6 +101,14 @@ pleine résolution demandait 17 minutes sur une source 1080p60 de 10 minutes,
 contre ~35 s ainsi — l’ancien plafond de 20 s du moteur ne laissait donc
 jamais aboutir la moindre vidéo longue. `PEAKCUT_TRACKING_TIMEOUT_MS` borne
 l’exécution (15 minutes par défaut).
+
+Le script reçoit `<mediaPath> <imagesDétectéesParSeconde> <imagesMesuréesParSeconde>`
+et rend, pour chaque visage, son identité suivie (`track_id`) et son activité
+labiale (`activity`). Ces deux champs sont ce qui permet de cadrer sur la
+personne qui parle (voir « Cadrage : le cadre suit celui qui parle ») ; ils
+restent **optionnels** dans le contrat de sortie, pour qu’un moteur plus
+ancien ou le vôtre continue de fonctionner — il ne pourra simplement pas
+piloter un cadrage au locuteur, et le dira.
 
 Vous pouvez aussi brancher votre propre moteur de détection externe (tout
 langage) via la variable d’environnement `PEAKCUT_TRACKER_COMMAND` (chemin
@@ -291,6 +300,65 @@ défaut) et `PEAKCUT_ASSETS_DIR` dit où vivent les octets. Aucune de ces
 variables n'est requise : sans elles, l'import d'images fonctionne et la
 génération se déclare indisponible.
 
+## Cadrage : le cadre suit celui qui parle
+
+Un cadre fixe convient à une personne et trahit un dialogue : sur un échange,
+le 9:16 doit être sur celui qui parle. Le plan de rendu d’un clip porte donc
+une liste de **plans de cadrage** (`renderPlan.framing`) — un rectangle de la
+source, de telle seconde à telle seconde — que l’export et l’aperçu compilent
+dans le même filtre `crop` que le zoom.
+
+La méthode croise deux mesures réelles, et rien d’autre :
+
+- **Qui parle quand** vient de la diarisation du transcript (AssemblyAI avec
+  `speaker_labels`). Un mot que le fournisseur n’a pas étiqueté ne prolonge
+  pas la prise de parole précédente : son incertitude ne doit pas devenir un
+  cadrage sur le mauvais visage.
+- **Quelle bouche bouge** vient de la détection locale. `track_faces.py`
+  décode désormais à 10 images/seconde tout en ne lançant la cascade de Haar
+  qu’une fois par seconde : le coût de détection est inchangé, et les images
+  intermédiaires servent à différencier la région de la bouche de chaque
+  visage suivi. Le mouvement global de l’image est soustrait, sinon un
+  mouvement de caméra ferait « parler » tout le monde à la fois.
+
+Le visage de chaque voix est celui qui a bougé pendant ses prises de parole
+(`assignSpeakersToFaces`). Ce qui compte autant que la réponse, c’est ce que
+cette association **refuse** de trancher : un seul visage, une seule voix, un
+moteur qui ne mesure pas l’activité labiale, ou deux visages qui bougent
+autant à 30 % près. Dans tous ces cas la réponse est « inconnu », le cadrage
+reste celui du clip, et le job de suivi dit précisément pourquoi. Une mauvaise
+association serait pire que pas d’association : elle cadrerait chaque clip sur
+la personne qui écoute.
+
+Le reste est éditorial, et c’est volontaire. Une interjection de deux mots est
+absorbée par le plan voisin plutôt que de devenir une coupe d’un quart de
+seconde ; une coupe entre deux intervenants tombe **au milieu du silence**,
+là où un monteur la place ; et le clip est couvert de bout en bout, pour que
+le cadre ne retombe jamais sur un cadrage par défaut en milieu de phrase. Un
+changement de locuteur est une **coupe franche** : faire glisser le cadre d’un
+visage à l’autre attire l’œil sur le recadrage au lieu de la personne qui
+parle.
+
+Le panneau « Cadrage du clip » du studio rend tout cela modifiable : déplacer
+une coupe, envoyer un plan sur l’autre intervenant, transformer une coupe en
+panoramique, supprimer un plan ou revenir à un cadre fixe. Les contrôles
+passent tous par `lib/effects/framingEdits`, qui garde les plans jointifs et
+dans les bornes que le serveur revérifie — l’interface ne peut donc pas
+proposer un cadrage que l’export refuserait.
+
+Deux bornes ont une raison concrète. Le nombre de plans est plafonné (16) parce
+que chaque plan ajoute une branche à l’expression `crop` sur x, y, w et h, et
+que la validation indépendante du filtergraph refuse au-delà de 8000
+caractères : un plan au-delà du plafond compilerait en un filtre que personne
+n’accepte, et retomberait en silence sur un cadrage statique. Et la fenêtre de
+cadrage garde la même taille d’un plan à l’autre : un plan est un autre
+centre, jamais une autre fenêtre — ce qui garde aussi l’expression courte.
+
+Il faut donc, pour qu’un clip suive le locuteur : un transcript diarisé, le
+détecteur local installé (voir plus haut), et au moins deux visages distincts
+dans la source. À défaut, le cadrage reste celui qui suit le visage détecté —
+ce qui est le bon résultat quand une seule personne parle.
+
 ## Timeline : rogner, couper, supprimer
 
 Les clips sont posés sur l’axe temporel de la source — à leur vraie place, donc
@@ -308,7 +376,12 @@ sur cette tranche et un plan d’effets exprimé en temps relatif au clip.
   ce qui sort, rallonger ramène ce qui rentre ;
 - le score est **recalculé** pour la nouvelle durée ;
 - le plan d’effets est **réajusté** (`retimeRenderPlan`) : la coupe suit le
-  clip, les images clés qui tombent après la nouvelle fin sont retirées.
+  clip, les images clés qui tombent après la nouvelle fin sont retirées, et le
+  plan est **décalé** quand c’est le début du clip qui bouge. Ce dernier point
+  compte surtout depuis « Couper en deux » : la seconde moitié commence plus
+  loin dans la source, et un plan laissé en place y décrirait une autre
+  tranche de vidéo — un zoom sur le mauvais mot, une illustration sur la
+  mauvaise phrase, un cadre sur la personne qui écoute.
 
 Ce dernier point n’est pas cosmétique : sans lui, raccourcir un clip laissait
 des images clés hors de sa plage, `validateRenderPlan` refusait le plan à
@@ -376,6 +449,22 @@ Short et vérifient réellement ses dimensions, codecs, audio et lisibilité via
 vision n’est pas installé (voir ci-dessus) — aucun média ou secret externe
 n’est requis pour faire passer la suite.
 
+Deux de ces tests valent d’être mentionnés, parce qu’ils mesurent un pixel
+plutôt qu’une intention : la source y est coupée en deux, blanche à gauche et
+noire à droite, et le test lit la **luminance moyenne** d’une image pendant
+chaque plan de cadrage. Une illustration qui n’apparaîtrait pas, ou un cadre
+qui ne basculerait pas sur l’autre visage, ferait échouer l’assertion — ce
+qu’un test de la seule valeur de retour laisserait passer.
+
+La partie Python de la détection a ses propres tests (identité d’un visage
+d’une image à l’autre, région de la bouche, activité labiale). Ils ne
+demandent ni vidéo ni OpenCV, seulement numpy :
+
+```bash
+.venv-vision/bin/python -m unittest discover -s scripts/vision -p "*_test.py"
+# Windows : .venv-vision\Scripts\python.exe -m unittest discover -s scripts/vision -p "*_test.py"
+```
+
 ## Structure
 
 ```text
@@ -388,6 +477,7 @@ src/
   lib/images/                  # interface et adaptateurs de génération d'images
   lib/assets/                  # magasin d'illustrations (octets sur disque, métadonnées en base)
   lib/effects/                 # plan de rendu par clip et compilation en filtres FFmpeg
+  lib/tracking/                # détection de sujets, suivi, locuteur actif et plans de cadrage
   lib/scoring/                 # score déterministe et explications
   lib/ffmpeg/                  # ASS, export et vérification ffprobe
   lib/demo/                    # projet de démonstration
@@ -431,11 +521,11 @@ par `/api/download-youtube` ci-dessus.
 
 - Brancher un fournisseur de transcription nécessite une configuration de secrets côté serveur ; aucun secret ne doit être commité.
 - La détection de potentiel est un score prédictif explicable, pas une mesure de watch time Analytics ni une promesse de performance.
-- Le suivi de visage est réel (OpenCV, cascade de Haar). Le suivi de locuteur et d’objet, et les effets avancés, restent à intégrer derrière des adaptateurs de rendu testables.
+- Le suivi de visage et le suivi du locuteur sont réels (OpenCV, cascade de Haar, plus l’activité labiale croisée à la diarisation). Le suivi d’objet et les effets avancés restent à intégrer derrière des adaptateurs de rendu testables.
 - Le cadrage suivi vaut pour une source filmée face caméra. Sur un partage d’écran, la cascade ne trouve que la webcam incrustée et le recadrage 9:16 cadre ce visage plutôt que le contenu montré — préférez-y `stable-center-fallback`, ou un recadrage manuel.
 - `gpt-4o-transcribe-diarize` renvoie des segments, pas des mots : les bornes mot-à-mot sont donc **interpolées** au prorata du nombre de caractères, et le surlignage des sous-titres dérive à l’intérieur d’un segment. L’API ne fournissant aucune confiance par mot, la valeur neutre de 0,5 est utilisée — ce qui déclenche sur chaque segment la pénalité « confiance de transcription faible » du scorer, uniformément.
 - Les effets réellement compilés par l’export sont le zoom animé, le style des sous-titres et les illustrations incrustées. Les effets 3D et le ducking audio sont déclarés dans le modèle mais pas encore appliqués : `renderPlan.limitations` dit précisément lesquels, sur chaque plan.
-- Le cadrage suit le visage détecté mais pas **le locuteur actif** : sur un plan à deux visages, le recadrage ne bascule pas sur celui qui parle.
+- Le cadrage suit le locuteur actif quand les trois conditions sont réunies (transcript diarisé, détecteur local, deux visages distincts) ; sinon il suit le visage détecté et le job de suivi dit laquelle manque. L’association voix-visage repose sur une corrélation entre diarisation et mouvement de la bouche, pas sur un modèle de détection de locuteur actif : elle refuse de trancher plus souvent qu’un tel modèle.
 - Les publications officielles nécessiteront OAuth, les permissions adéquates et une validation humaine explicite.
 
 

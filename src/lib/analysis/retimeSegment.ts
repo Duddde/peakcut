@@ -45,7 +45,13 @@ export function retimeSegment(segment: Segment, options: RetimeSegmentOptions): 
     endSec,
     words,
     score: scoreSegment({ words, startSec, endSec }),
-    renderPlan: segment.renderPlan ? retimeRenderPlan(segment.renderPlan, endSec - startSec) : null,
+    // The plan's times are relative to the clip's start, so moving that
+    // start has to move them with it — otherwise dragging the left edge,
+    // or taking the second half of a split clip, keeps an edit that now
+    // describes a different stretch of video.
+    renderPlan: segment.renderPlan
+      ? retimeRenderPlan(segment.renderPlan, endSec - startSec, startSec - segment.startSec)
+      : null,
   };
 }
 

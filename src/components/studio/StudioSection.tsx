@@ -20,6 +20,7 @@ import { Timeline } from "@/components/editor/Timeline";
 import { TranscriptEditor } from "@/components/editor/TranscriptEditor";
 import { VariantPicker } from "@/components/editor/VariantPicker";
 import { EffectsPanel } from "@/components/editor/EffectsPanel";
+import { FramingPanel } from "@/components/editor/FramingPanel";
 import { IllustrationsPanel } from "@/components/editor/IllustrationsPanel";
 import { retimeSegment, splitSegment } from "@/lib/analysis/retimeSegment";
 import { AccountGate } from "@/components/AccountGate";
@@ -1425,6 +1426,12 @@ export function StudioSection({
             }
           />
           <EffectsPanel
+            segment={selectedSegment}
+            readOnly={isPublicDemo}
+            onReadOnlyAttempt={requireAccountForCustomization}
+            onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
+          />
+          <FramingPanel
             segment={selectedSegment}
             readOnly={isPublicDemo}
             onReadOnlyAttempt={requireAccountForCustomization}

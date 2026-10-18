@@ -71,6 +71,13 @@ describe("retimeSegment", () => {
     }
   });
 
+  it("moves the plan with the clip when the left edge is dragged", () => {
+    const trimmed = retimeSegment(segment(0, 60), { startSec: 20, endSec: 60, transcript: TRANSCRIPT });
+    expect(trimmed.renderPlan!.cuts).toEqual([{ startSec: 0, endSec: 40 }]);
+    expect(trimmed.renderPlan!.zoomKeyframes.every((kf) => kf.tSec >= 0 && kf.tSec <= 40)).toBe(true);
+    expect(validateRenderPlan(trimmed.renderPlan!)).toEqual({ ok: true, errors: [] });
+  });
+
   it("leaves a clip without a plan without one", () => {
     const base = { ...segment(0, 60), renderPlan: null };
     expect(retimeSegment(base, { startSec: 0, endSec: 30, transcript: TRANSCRIPT }).renderPlan).toBeNull();
@@ -106,6 +113,48 @@ describe("splitSegment", () => {
     expect(right.id).toBe("seg-right");
     expect(validateRenderPlan(left.renderPlan!).ok).toBe(true);
     expect(validateRenderPlan(right.renderPlan!).ok).toBe(true);
+  });
+
+  /**
+   * The right half starts 30 s later in the source, so its plan has to
+   * move with it. Without that, the second half of a split clip keeps the
+   * first half's edit: a zoom on the wrong word, and a frame on whoever
+   * was speaking thirty seconds earlier.
+   */
+  it("moves the second half's plan to the video it now covers", () => {
+    const framed = segment(0, 60);
+    framed.renderPlan = {
+      ...framed.renderPlan!,
+      framing: [
+        {
+          id: "shot-1",
+          startSec: 0,
+          endSec: 30,
+          rect: { x: 0.05, y: 0, width: 0.5625, height: 1 },
+          transitionSec: 0,
+          source: "speaker",
+          label: "Intervenant A",
+        },
+        {
+          id: "shot-2",
+          startSec: 30,
+          endSec: 60,
+          rect: { x: 0.39, y: 0, width: 0.5625, height: 1 },
+          transitionSec: 0,
+          source: "speaker",
+          label: "Intervenant B",
+        },
+      ],
+    };
+
+    const [left, right] = splitSegment(framed, 30, { transcript: TRANSCRIPT, idFor })!;
+
+    expect(left.renderPlan!.framing.map((s) => s.id)).toEqual(["shot-1"]);
+    expect(right.renderPlan!.framing.map((s) => s.id)).toEqual(["shot-2"]);
+    expect(right.renderPlan!.framing[0].startSec).toBe(0);
+    expect(right.renderPlan!.framing[0].endSec).toBe(30);
+    expect(right.renderPlan!.framing[0].label).toBe("Intervenant B");
+    expect(validateRenderPlan(right.renderPlan!)).toEqual({ ok: true, errors: [] });
   });
 
   it("refuses a cut that would leave a sliver, rather than making an unusable clip", () => {

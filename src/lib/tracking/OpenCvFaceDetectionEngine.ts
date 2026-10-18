@@ -44,6 +44,8 @@ export interface OpenCvFaceDetectionEngineOptions {
   availabilityTimeoutMs?: number;
   /** Frames sampled per second of source. Defaults to DEFAULT_SAMPLE_FPS. */
   sampleFps?: number;
+  /** Frames per second used to measure mouth movement. Defaults to DEFAULT_ACTIVITY_FPS. */
+  activityFps?: number;
 }
 
 /**
@@ -58,11 +60,25 @@ const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
 
 /**
- * One sampled frame per second. The crop derived from a track is static
- * per segment (deriveCropFromTrack reads the box at one instant), so a
- * finer sampling rate costs decode time without changing a single crop.
+ * One detected frame per second. A crop that follows one subject is
+ * static per segment (deriveCropFromTrack reads the box at one instant),
+ * so detecting faces more often costs decode time without changing a
+ * single crop.
+ *
+ * Mouth movement is another matter: it is invisible at one sample per
+ * second, and it is what tells which of two faces is speaking. The script
+ * therefore decodes at a higher rate than it detects at — see
+ * ACTIVITY_FPS and scripts/vision/track_faces.py.
  */
 const DEFAULT_SAMPLE_FPS = 1;
+
+/**
+ * Frames per second used to measure mouth movement between two detections.
+ * Speech moves a mouth several times a second; at 10 fps the difference
+ * between a talking face and a listening one is plain, and the cost is
+ * only extra piped frames at 480px wide — the decode happens either way.
+ */
+const DEFAULT_ACTIVITY_FPS = 10;
 
 function configuredTimeoutMs(): number {
   const raw = Number(process.env.PEAKCUT_TRACKING_TIMEOUT_MS);
@@ -131,6 +147,19 @@ export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
     if (d.kind !== "face") {
       throw new OpenCvEngineInvalidOutputError(`detections[${index}].kind doit valoir "face".`);
     }
+
+    // track_id and activity arrived with active-speaker framing. They stay
+    // optional on purpose: an older script, or a user's own engine behind
+    // PEAKCUT_TRACKER_COMMAND, produces detections without them and must
+    // keep working — it simply cannot drive a framing that follows the
+    // speaker, and says so (see assignSpeakersToFaces).
+    if (d.track_id !== undefined && (typeof d.track_id !== "string" || d.track_id.length === 0)) {
+      throw new OpenCvEngineInvalidOutputError(`detections[${index}].track_id doit être une chaîne non vide.`);
+    }
+    if (d.activity !== undefined && (!isFiniteNumber(d.activity) || d.activity < 0 || d.activity > 1)) {
+      throw new OpenCvEngineInvalidOutputError(`detections[${index}].activity doit être un nombre dans [0, 1].`);
+    }
+
     return {
       tSec: d.tSec,
       x: d.x,
@@ -138,6 +167,8 @@ export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
       width: d.width,
       height: d.height,
       score: d.confidence,
+      ...(typeof d.track_id === "string" ? { trackId: d.track_id } : {}),
+      ...(isFiniteNumber(d.activity) ? { activity: d.activity } : {}),
     };
   });
 }
@@ -190,6 +221,7 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
   private readonly timeoutMs: number;
   private readonly availabilityTimeoutMs: number;
   private readonly sampleFps: number;
+  private readonly activityFps: number;
 
   constructor(options: OpenCvFaceDetectionEngineOptions = {}) {
     this.pythonBinary = options.pythonBinary ?? process.env.PEAKCUT_PYTHON_BINARY ?? "python3";
@@ -197,6 +229,7 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
     this.timeoutMs = options.timeoutMs ?? configuredTimeoutMs();
     this.availabilityTimeoutMs = options.availabilityTimeoutMs ?? DEFAULT_AVAILABILITY_TIMEOUT_MS;
     this.sampleFps = options.sampleFps ?? DEFAULT_SAMPLE_FPS;
+    this.activityFps = options.activityFps ?? DEFAULT_ACTIVITY_FPS;
   }
 
   /** Cheap real check: can this Python + OpenCV actually run? Never throws. */
@@ -212,7 +245,7 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
   async detect(input: SubjectDetectionInput): Promise<DetectedBoundingBox[]> {
     const { stdout, stderr, code, timedOut } = await runProcess(
       this.pythonBinary,
-      [this.scriptPath, input.mediaPath, String(this.sampleFps)],
+      [this.scriptPath, input.mediaPath, String(this.sampleFps), String(this.activityFps)],
       this.timeoutMs
     );
 

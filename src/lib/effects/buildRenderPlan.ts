@@ -178,6 +178,12 @@ export function buildRenderPlan(templateId: EffectTemplateId, context: BuildRend
     // No template invents an illustration: there is no image to show
     // until the user adds or generates one (see lib/assets).
     overlays: [],
+    // Nor does a template invent a framing: which face to follow is a
+    // fact about the video, read off a real detection by the tracking
+    // job (see lib/tracking/buildSpeakerFraming), never a guess made
+    // from the transcript alone. No shots means the clip keeps the
+    // single crop its variant already carries.
+    framing: [],
     zoomKeyframes: tooShortToEdit ? [{ tSec: 0, scale: ZOOM_SCALE_MIN }] : output.zoomKeyframes,
     subtitleStyle: output.subtitleStyle,
     safeZones: buildDefaultSafeZones(context.segmentId),

@@ -8,8 +8,10 @@ import { verifyExport } from "./verifyExport";
 import { assertDecodable } from "./assertDecodable";
 import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 import { createSyntheticVideo } from "../../../test/fixtures/createSyntheticVideo";
+import { createSplitVideo, VERTICAL_WINDOW_WIDTH } from "../../../test/fixtures/createSplitVideo";
+import { averageLuma } from "../../../test/fixtures/averageLuma";
 import type { TranscriptWord } from "@/lib/domain/types";
-import type { Overlay } from "@/lib/effects/types";
+import type { FramingShot, Overlay } from "@/lib/effects/types";
 
 const SOURCE_DURATION_SEC = 6;
 
@@ -41,44 +43,6 @@ function runFfmpegForTest(args: string[]): Promise<void> {
       code === 0 ? resolve() : reject(new Error(`ffmpeg (test) code ${code}:
 ${stderr.slice(-2000)}`))
     );
-  });
-}
-
-/**
- * Average brightness of one frame of a finished clip, decoded to raw
- * 8-bit grey and averaged in JS. Crude on purpose: it needs no image
- * library, and it is enough to tell "a white picture is on screen here"
- * from "it is not" — which is the only thing an overlay test has to prove.
- */
-function averageLuma(clipPath: string, atSec: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "ffmpeg",
-      [
-        "-v", "error",
-        "-ss", atSec.toFixed(3),
-        "-i", clipPath,
-        "-frames:v", "1",
-        "-vf", "scale=64:64",
-        "-pix_fmt", "gray",
-        "-f", "rawvideo",
-        "-",
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
-    const chunks: Buffer[] = [];
-    child.stdout.on("data", (chunk) => chunks.push(chunk));
-    child.on("error", reject);
-    child.on("close", () => {
-      const data = Buffer.concat(chunks);
-      if (data.length === 0) {
-        reject(new Error(`Aucune image décodée à t=${atSec}s dans ${clipPath}.`));
-        return;
-      }
-      let total = 0;
-      for (const byte of data) total += byte;
-      resolve(total / data.length);
-    });
   });
 }
 
@@ -310,4 +274,126 @@ describe("exportSegment (real ffmpeg + real ffprobe)", () => {
       })
     ).rejects.toThrow(/endSec/);
   });
+});
+
+const CENTERED_CROP = {
+  x: (1 - VERTICAL_WINDOW_WIDTH) / 2,
+  y: 0,
+  width: VERTICAL_WINDOW_WIDTH,
+  height: 1,
+};
+
+function framingShot(id: string, startSec: number, endSec: number, x: number, transitionSec = 0): FramingShot {
+  return {
+    id,
+    startSec,
+    endSec,
+    rect: { x, y: 0, width: VERTICAL_WINDOW_WIDTH, height: 1 },
+    transitionSec,
+    source: "speaker",
+    label: "Intervenant A",
+  };
+}
+
+describe("exportSegment — cadrage par plans (real ffmpeg)", () => {
+  let workDir: string;
+  let sourcePath: string;
+
+  beforeAll(async () => {
+    workDir = await mkdtemp(path.join(tmpdir(), "peakcut-framing-"));
+    sourcePath = path.join(workDir, "split.mp4");
+    await createSplitVideo(sourcePath, 5);
+  }, 60000);
+
+  afterAll(async () => {
+    if (workDir) {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("déplace réellement le cadre d'un côté à l'autre au moment dit", async () => {
+    const outputPath = path.join(workDir, "framed.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: {
+        ...plan,
+        framing: [framingShot("shot-1", 0, 2, 0), framingShot("shot-2", 2, 4, 1 - VERTICAL_WINDOW_WIDTH)],
+      },
+    });
+
+    expect(result.renderApplied.framing).toBe(2);
+
+    // First shot: the frame is on the white half from edge to edge.
+    expect(await averageLuma(outputPath, 0.5)).toBeGreaterThan(200);
+    // Second shot: it is on the black half, and nothing of the white one
+    // is left in frame.
+    expect(await averageLuma(outputPath, 3)).toBeLessThan(60);
+
+    const probe = await verifyExport(outputPath);
+    expect(probe.width).toBe(EXPORT_WIDTH);
+    expect(probe.height).toBe(EXPORT_HEIGHT);
+    // The crop moved inside a single filter: the audio stream has to come
+    // out the other side untouched.
+    expect(probe.audioCodec).toBe("aac");
+  }, 120000);
+
+  it("fait glisser le cadre quand le plan demande un panoramique", async () => {
+    const outputPath = path.join(workDir, "panned.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: {
+        ...plan,
+        framing: [framingShot("shot-1", 0, 2, 0), framingShot("shot-2", 2, 4, 1 - VERTICAL_WINDOW_WIDTH, 1)],
+      },
+    });
+
+    expect(result.renderApplied.framing).toBe(2);
+
+    const before = await averageLuma(outputPath, 1);
+    const during = await averageLuma(outputPath, 2.2);
+    const after = await averageLuma(outputPath, 3.5);
+
+    // Halfway through the pan the frame is halfway across: strictly
+    // darker than the white half and strictly brighter than the black one.
+    expect(during).toBeLessThan(before);
+    expect(during).toBeGreaterThan(after);
+  }, 120000);
+
+  it("retombe sur le cadrage statique, et le dit, quand les plans se chevauchent", async () => {
+    const outputPath = path.join(workDir, "overlapping.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: {
+        ...plan,
+        // A plan this broken is refused by validateRenderPlan before it
+        // ever reaches ffmpeg; the export still has to produce the clip.
+        framing: [framingShot("shot-1", 0, 3, 0), framingShot("shot-2", 1, 4, 1 - VERTICAL_WINDOW_WIDTH)],
+      },
+    });
+
+    expect(result.renderApplied.framing).toBe(0);
+    expect(result.renderLimitations.some((n) => /invalide|chevauchent/i.test(n))).toBe(true);
+    await assertDecodable(outputPath);
+  }, 120000);
 });

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { buildRenderPlan } from "./buildRenderPlan";
 import { validateRenderPlan } from "./validateRenderPlan";
-import { MAX_OVERLAYS_PER_PLAN, type Overlay, type RenderPlan } from "./types";
+import {
+  FRAMING_LABEL_MAX_LENGTH,
+  MAX_FRAMING_SHOTS_PER_PLAN,
+  MAX_OVERLAYS_PER_PLAN,
+  type FramingShot,
+  type Overlay,
+  type RenderPlan,
+} from "./types";
 
 function validPlan(): RenderPlan {
   return buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 10 });
@@ -217,5 +224,128 @@ describe("validateRenderPlan overlays", () => {
     const plan = validPlan();
     plan.overlays = [overlay({ id: "a" }), overlay({ id: "b", startSec: 4, endSec: 8 })];
     expect(validateRenderPlan(plan).ok).toBe(true);
+  });
+});
+
+function shot(overrides: Partial<FramingShot> = {}): FramingShot {
+  return {
+    id: "shot-1",
+    startSec: 0,
+    endSec: 5,
+    rect: { x: 0.05, y: 0, width: 0.5625, height: 1 },
+    transitionSec: 0,
+    source: "speaker",
+    label: "Intervenant A",
+    ...overrides,
+  };
+}
+
+describe("validateRenderPlan — cadrage par plans", () => {
+  it("accepte un clip sans plan de cadrage : un seul cadrage statique est valide", () => {
+    const plan = validPlan();
+    plan.framing = [];
+    expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+  });
+
+  it("accepte deux plans contigus qui couvrent le clip", () => {
+    const plan = validPlan();
+    plan.framing = [shot(), shot({ id: "shot-2", startSec: 5, endSec: 10, rect: { x: 0.39, y: 0, width: 0.5625, height: 1 } })];
+    expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+  });
+
+  it("refuse deux plans qui se chevauchent : à un instant donné un seul cadrage peut gagner", () => {
+    const plan = validPlan();
+    plan.framing = [shot(), shot({ id: "shot-2", startSec: 4, endSec: 9 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /chevauchent/i.test(e))).toBe(true);
+  });
+
+  it("refuse un plan plus court que la durée minimale", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ endSec: 0.1 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /trop courte/i.test(e))).toBe(true);
+  });
+
+  it("refuse un plan hors de la plage des coupes", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ startSec: 20, endSec: 25 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /plage des coupes/i.test(e))).toBe(true);
+  });
+
+  it("refuse une fenêtre de cadrage qui sort du cadre source", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ rect: { x: 0.6, y: 0, width: 0.5625, height: 1 } })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /cadre source/i.test(e))).toBe(true);
+  });
+
+  it("refuse une fenêtre trop petite pour rester regardable après agrandissement", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ rect: { x: 0.1, y: 0.1, width: 0.01, height: 0.01 } })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /trop petite/i.test(e))).toBe(true);
+  });
+
+  it("refuse une transition hors bornes", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ transitionSec: 3 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /transition/i.test(e))).toBe(true);
+  });
+
+  it("refuse une transition plus longue que le plan qu'elle ouvre", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ startSec: 0, endSec: 0.5, transitionSec: 0.9 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /transition|trop courte/i.test(e))).toBe(true);
+  });
+
+  it("refuse une source de plan inconnue", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ source: "magique" as FramingShot["source"] })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /source inconnue/i.test(e))).toBe(true);
+  });
+
+  it("refuse un libellé interminable", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ label: "x".repeat(FRAMING_LABEL_MAX_LENGTH + 1) })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /libellé/i.test(e))).toBe(true);
+  });
+
+  it("accepte un libellé absent", () => {
+    const plan = validPlan();
+    plan.framing = [shot({ label: null })];
+    expect(validateRenderPlan(plan).ok).toBe(true);
+  });
+
+  it("refuse deux plans qui partagent un identifiant", () => {
+    const plan = validPlan();
+    plan.framing = [shot(), shot({ startSec: 5, endSec: 10 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /double/i.test(e))).toBe(true);
+  });
+
+  it("borne le nombre de plans de cadrage", () => {
+    const plan = buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 120 });
+    plan.framing = Array.from({ length: MAX_FRAMING_SHOTS_PER_PLAN + 1 }, (_, i) =>
+      shot({ id: `shot-${i}`, startSec: i * 2, endSec: i * 2 + 2 })
+    );
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /trop de plans de cadrage/i.test(e))).toBe(true);
   });
 });

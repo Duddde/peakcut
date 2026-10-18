@@ -11,6 +11,8 @@ import {
 } from "./renderPreviewSegment";
 import { verifyExport } from "./verifyExport";
 import { createSyntheticVideo } from "../../../test/fixtures/createSyntheticVideo";
+import { createSplitVideo, VERTICAL_WINDOW_WIDTH } from "../../../test/fixtures/createSplitVideo";
+import { averageLuma } from "../../../test/fixtures/averageLuma";
 import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 
 describe("renderPreviewSegment (real ffmpeg + real ffprobe)", () => {
@@ -98,4 +100,68 @@ describe("renderPreviewSegment (real ffmpeg + real ffprobe)", () => {
       renderPreviewSegment({ inputMediaPath: sourcePath, startSec: 0, endSec: 25, outputPath })
     ).rejects.toThrow(PreviewDurationExceededError);
   });
+});
+
+describe("renderPreviewSegment — cadrage par plans (real ffmpeg)", () => {
+  let workDir: string;
+  let sourcePath: string;
+
+  beforeAll(async () => {
+    workDir = await mkdtemp(path.join(tmpdir(), "peakcut-preview-framing-"));
+    sourcePath = path.join(workDir, "split.mp4");
+    await createSplitVideo(sourcePath, 5);
+  }, 60000);
+
+  afterAll(async () => {
+    if (workDir) await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("montre le même changement de cadre que l'export, à l'instant près", async () => {
+    // A preview that framed the clip differently from the export would be
+    // worse than no preview at all: it would show an edit nobody is going
+    // to receive.
+    const outputPath = path.join(workDir, "preview-framed.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+    const window = { y: 0, width: VERTICAL_WINDOW_WIDTH, height: 1 };
+
+    const result = await renderPreviewSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      crop: { x: (1 - VERTICAL_WINDOW_WIDTH) / 2, ...window },
+      renderPlan: {
+        ...plan,
+        framing: [
+          {
+            id: "shot-1",
+            startSec: 0,
+            endSec: 2,
+            rect: { x: 0, ...window },
+            transitionSec: 0,
+            source: "speaker",
+            label: "Intervenant A",
+          },
+          {
+            id: "shot-2",
+            startSec: 2,
+            endSec: 4,
+            rect: { x: 1 - VERTICAL_WINDOW_WIDTH, ...window },
+            transitionSec: 0,
+            source: "speaker",
+            label: "Intervenant B",
+          },
+        ],
+      },
+    });
+
+    expect(result.renderApplied.framing).toBe(2);
+    expect(await averageLuma(outputPath, 0.5)).toBeGreaterThan(180);
+    expect(await averageLuma(outputPath, 3)).toBeLessThan(80);
+
+    const verified = await verifyExport(outputPath);
+    expect(verified.width).toBe(PREVIEW_WIDTH);
+    expect(verified.height).toBe(PREVIEW_HEIGHT);
+    expect(verified.audioCodec).toBe("aac");
+  }, 120000);
 });

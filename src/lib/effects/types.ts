@@ -68,6 +68,46 @@ export interface Overlay {
   fadeSec: number;
 }
 
+/**
+ * One stretch of the clip framed on one place in the source: the shot.
+ *
+ * This is how a short follows the person who is speaking. A talking-head
+ * crop that never moves is right for one voice and wrong for two: on an
+ * exchange, the frame has to be on whoever is talking, and that means the
+ * crop rectangle changes during the clip. A plan's `framing` is that
+ * list of changes, as editable as everything else in a RenderPlan.
+ *
+ * `rect` is normalized to the *source* frame, like a variant's `crop` and
+ * unlike an Overlay's rect — a shot says where to look in the original,
+ * not where to put something on the short. Times are clip-relative.
+ *
+ * An empty `framing` means "keep the variant's static crop for the whole
+ * clip", which is exactly what every plan did before shots existed.
+ *
+ * `transitionSec` is the pan from the previous shot's rectangle into this
+ * one; 0 is a hard cut, which is what a speaker change normally wants -
+ * a slow glide between two faces reads as a mistake, not as an effect.
+ */
+export interface FramingShot {
+  id: string;
+  startSec: number;
+  endSec: number;
+  rect: NormalizedRect;
+  transitionSec: number;
+  /**
+   * Where this shot came from: an active speaker matched to a face, a
+   * detected subject with no speaker attached, or the user's own hand.
+   * Shown in the studio, so nobody mistakes a detection for a decision.
+   */
+  source: FramingShotSource;
+  /** Short human label for the subject, e.g. "Intervenant A"; null when unknown. */
+  label: string | null;
+}
+
+export type FramingShotSource = "speaker" | "subject" | "manual";
+
+export const FRAMING_SHOT_SOURCES: FramingShotSource[] = ["speaker", "subject", "manual"];
+
 export interface AudioDucking {
   enabled: boolean;
   /** Attenuation applied to background audio while speech is present, in dB (negative = quieter). */
@@ -84,6 +124,8 @@ export interface RenderPlan {
   zoomKeyframes: ZoomKeyframe[];
   /** Illustrations laid over the clip, in no particular order. */
   overlays: Overlay[];
+  /** Shots the crop follows, in chronological order; empty = one static crop. */
+  framing: FramingShot[];
   subtitleStyle: SubtitleStyle;
   safeZones: SafeZone[];
   audioDucking: AudioDucking;
@@ -123,6 +165,25 @@ export const OVERLAY_FADE_SEC_MIN = 0;
 export const OVERLAY_FADE_SEC_MAX = 1.5;
 /** Smallest visible overlay, as a fraction of the output frame. */
 export const OVERLAY_MIN_SIZE = 0.02;
+
+/**
+ * Framing bounds.
+ *
+ * The count is capped for a concrete reason: every shot adds a branch to
+ * the animated `crop` expression on each of x, y, w and h, and
+ * validateFilterGraph refuses a graph over 8000 characters. A plan that
+ * went past the cap would compile into a filter nobody accepts and fall
+ * back to a static crop — better to refuse the plan than to silently
+ * render something else.
+ */
+export const MAX_FRAMING_SHOTS_PER_PLAN = 16;
+/** Below this, a reframe reads as a glitch rather than as a cut. */
+export const MIN_FRAMING_SHOT_DURATION_SEC = 0.4;
+export const FRAMING_TRANSITION_SEC_MIN = 0;
+export const FRAMING_TRANSITION_SEC_MAX = 1;
+/** A crop window smaller than this would upscale a patch of source past recognition. */
+export const FRAMING_MIN_SIZE = 0.05;
+export const FRAMING_LABEL_MAX_LENGTH = 40;
 
 export const FONT_SIZE_SCALE_MIN = 0.7;
 export const FONT_SIZE_SCALE_MAX = 1.4;

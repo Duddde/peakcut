@@ -46,6 +46,8 @@ export interface RenderApplied {
   ducking: boolean;
   /** How many of the plan's illustrations were actually composited. */
   overlays: number;
+  /** How many framing shots actually moved the crop; 0 means one static framing. */
+  framing: number;
   templateId: string | null;
 }
 
@@ -72,6 +74,7 @@ interface ResolvedVideoFilter {
   /** True when the crop fragment already includes the final scale (the no-crop default path does its own scale-then-crop). */
   includesFinalScale: boolean;
   zoomApplied: boolean;
+  framingApplied: number;
   notes: string[];
 }
 
@@ -83,7 +86,13 @@ interface ResolvedVideoFilter {
  */
 function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: RenderPlan | undefined): ResolvedVideoFilter {
   if (!renderPlan) {
-    return { cropFragment: staticCropOnlyFragment(crop), includesFinalScale: !crop, zoomApplied: false, notes: [] };
+    return {
+      cropFragment: staticCropOnlyFragment(crop),
+      includesFinalScale: !crop,
+      zoomApplied: false,
+      framingApplied: 0,
+      notes: [],
+    };
   }
 
   const planCheck = validateRenderPlan(renderPlan);
@@ -92,6 +101,7 @@ function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: Re
       cropFragment: staticCropOnlyFragment(crop),
       includesFinalScale: !crop,
       zoomApplied: false,
+      framingApplied: 0,
       notes: [`Plan de rendu invalide, cadrage statique de repli appliqué : ${planCheck.errors.join(" ")}`],
     };
   }
@@ -101,13 +111,22 @@ function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: Re
       cropFragment: staticCropOnlyFragment(crop),
       includesFinalScale: true,
       zoomApplied: false,
+      framingApplied: 0,
       notes: [
-        "Aucun cadrage (crop) de base fourni : le zoom animé du plan nécessite un cadrage explicite, cadrage statique par défaut appliqué à la place.",
+        renderPlan.framing.length > 0
+          ? "Aucun cadrage (crop) de base fourni : le zoom animé et le suivi du locuteur nécessitent un cadrage explicite, cadrage statique par défaut appliqué à la place."
+          : "Aucun cadrage (crop) de base fourni : le zoom animé du plan nécessite un cadrage explicite, cadrage statique par défaut appliqué à la place.",
       ],
     };
   }
 
-  const compiled = compileZoomFilter({ baseCrop: crop, zoomKeyframes: renderPlan.zoomKeyframes });
+  const compiled = compileZoomFilter({
+    baseCrop: crop,
+    zoomKeyframes: renderPlan.zoomKeyframes,
+    // The shots that make the crop follow whoever is speaking; the same
+    // single crop filter carries them and the zoom together.
+    framing: renderPlan.framing,
+  });
   const candidateFragment = `${compiled.filterFragment},scale=${EXPORT_WIDTH}:${EXPORT_HEIGHT}`;
   const graphCheck = validateFilterGraph(candidateFragment);
   if (!graphCheck.ok) {
@@ -115,8 +134,9 @@ function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: Re
       cropFragment: staticCropOnlyFragment(crop),
       includesFinalScale: false,
       zoomApplied: false,
+      framingApplied: 0,
       notes: [
-        `Filtergraph de zoom rejeté par la validation indépendante, cadrage statique de repli appliqué : ${graphCheck.errors.join(" ")}`,
+        `Filtergraph de cadrage rejeté par la validation indépendante, cadrage statique de repli appliqué : ${graphCheck.errors.join(" ")}`,
       ],
     };
   }
@@ -125,6 +145,7 @@ function resolveVideoCropFilter(crop: NormalizedRect | undefined, renderPlan: Re
     cropFragment: compiled.filterFragment,
     includesFinalScale: false,
     zoomApplied: compiled.zoomApplied,
+    framingApplied: compiled.framingApplied,
     notes: compiled.notes,
   };
 }
@@ -304,6 +325,7 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
     subtitleStyle: subtitleStyleApplied,
     ducking: false,
     overlays: overlays.appliedCount,
+    framing: resolvedCrop.framingApplied,
     templateId: renderPlan?.templateId ?? null,
   };
   const renderLimitations = [
