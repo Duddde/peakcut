@@ -10,6 +10,11 @@ import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 import { createSyntheticVideo } from "../../../test/fixtures/createSyntheticVideo";
 import { createSplitVideo, VERTICAL_WINDOW_WIDTH } from "../../../test/fixtures/createSplitVideo";
 import { averageLuma } from "../../../test/fixtures/averageLuma";
+import {
+  createBandedVideo,
+  LEFT_COLUMN,
+  RIGHT_COLUMN,
+} from "../../../test/fixtures/createBandedVideo";
 import type { TranscriptWord } from "@/lib/domain/types";
 import type { FramingShot, Overlay } from "@/lib/effects/types";
 
@@ -396,4 +401,124 @@ describe("exportSegment — cadrage par plans (real ffmpeg)", () => {
     expect(result.renderLimitations.some((n) => /invalide|chevauchent/i.test(n))).toBe(true);
     await assertDecodable(outputPath);
   }, 120000);
+});
+
+describe("exportSegment \u2014 effets 3D (real ffmpeg)", () => {
+  let workDir: string;
+  let sourcePath: string;
+
+  beforeAll(async () => {
+    workDir = await mkdtemp(path.join(tmpdir(), "peakcut-3d-"));
+    sourcePath = path.join(workDir, "banded.mp4");
+    await createBandedVideo(sourcePath, 5);
+  }, 60000);
+
+  afterAll(async () => {
+    if (workDir) {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("incline r\u00e9ellement l'image au moment dit, et la laisse plate ailleurs", async () => {
+    const outputPath = path.join(workDir, "tilted.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: {
+        ...plan,
+        perspectiveMoves: [
+          {
+            id: "m3d-1",
+            startSec: 1,
+            endSec: 3,
+            direction: "left",
+            profile: "swing",
+            amount: 1,
+          },
+        ],
+      },
+    });
+
+    expect(result.renderApplied.perspective).toBe(1);
+
+    // Hors de la fen\u00eatre du mouvement, les deux colonnes voient la m\u00eame
+    // bande blanche : l'image est plate, exactement comme avant les effets 3D.
+    const flatLeft = await averageLuma(outputPath, 0.4, LEFT_COLUMN);
+    const flatRight = await averageLuma(outputPath, 0.4, RIGHT_COLUMN);
+    expect(Math.abs(flatLeft - flatRight)).toBeLessThan(4);
+
+    // Au sommet du balancement, le bord gauche s'est avanc\u00e9 : il montre
+    // moins de source agrandie, donc moins de blanc que le bord droit.
+    const tiltedLeft = await averageLuma(outputPath, 2, LEFT_COLUMN);
+    const tiltedRight = await averageLuma(outputPath, 2, RIGHT_COLUMN);
+    expect(tiltedRight - tiltedLeft).toBeGreaterThan(8);
+
+    // Et le clip revient \u00e0 plat apr\u00e8s le mouvement.
+    const afterLeft = await averageLuma(outputPath, 3.6, LEFT_COLUMN);
+    const afterRight = await averageLuma(outputPath, 3.6, RIGHT_COLUMN);
+    expect(Math.abs(afterLeft - afterRight)).toBeLessThan(4);
+
+    const probe = await verifyExport(outputPath);
+    expect(probe.width).toBe(EXPORT_WIDTH);
+    expect(probe.height).toBe(EXPORT_HEIGHT);
+    // La chaîne 3D cale la cadence pour lire son horloge ; l'audio doit
+    // sortir intact de l'autre c\u00f4t\u00e9.
+    expect(probe.audioCodec).toBe("aac");
+  }, 180000);
+
+  it("incline l'autre axe quand le mouvement est vertical", async () => {
+    const outputPath = path.join(workDir, "tilted-vertical.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: {
+        ...plan,
+        perspectiveMoves: [
+          { id: "m3d-1", startSec: 1, endSec: 3, direction: "up", profile: "swing", amount: 1 },
+        ],
+      },
+    });
+
+    expect(result.renderApplied.perspective).toBe(1);
+    // Une inclinaison verticale ne distingue pas la gauche de la droite :
+    // elle pince les bords horizontaux, pas les verticaux.
+    const left = await averageLuma(outputPath, 2, LEFT_COLUMN);
+    const right = await averageLuma(outputPath, 2, RIGHT_COLUMN);
+    expect(Math.abs(left - right)).toBeLessThan(6);
+    // Mais elle change bien l'image : la bande blanche n'occupe plus la
+    // m\u00eame part du cadre qu'\u00e0 plat.
+    const flat = await averageLuma(outputPath, 0.4);
+    const tilted = await averageLuma(outputPath, 2);
+    expect(Math.abs(tilted - flat)).toBeGreaterThan(3);
+  }, 180000);
+
+  it("exporte \u00e0 plat, sans rien changer, quand le plan ne porte aucun mouvement", async () => {
+    const outputPath = path.join(workDir, "flat.mp4");
+    const result = await exportSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 3,
+      outputPath,
+      words: [],
+      crop: CENTERED_CROP,
+      renderPlan: buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 3 }),
+    });
+
+    expect(result.renderApplied.perspective).toBe(0);
+    const left = await averageLuma(outputPath, 1.5, LEFT_COLUMN);
+    const right = await averageLuma(outputPath, 1.5, RIGHT_COLUMN);
+    expect(Math.abs(left - right)).toBeLessThan(2);
+  }, 180000);
 });

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import type { NormalizedRect, TranscriptWord } from "@/lib/domain/types";
 import { compileZoomFilter } from "@/lib/effects/compileZoomFilter";
+import { compilePerspectiveFilter } from "@/lib/effects/compilePerspectiveFilter";
 import { compileOverlayFilters, type OverlayInput } from "@/lib/effects/compileOverlayFilters";
 import { validateFilterGraph } from "@/lib/effects/validateFilterGraph";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
@@ -64,7 +65,7 @@ export interface RenderPreviewSegmentResult {
   /** Written only when captions were burned in; the caller owns cleanup, as with exportSegment. */
   assPath: string | null;
   /** What of the plan actually made it into this preview. */
-  renderApplied: { zoom: boolean; subtitles: boolean; overlays: number; framing: number };
+  renderApplied: { zoom: boolean; subtitles: boolean; overlays: number; framing: number; perspective: number };
 }
 
 function escapeDrawtext(text: string): string {
@@ -206,6 +207,28 @@ function previewCropFragment(
 }
 
 /**
+ * The preview's 3D moves, compiled exactly as the export compiles them.
+ *
+ * Same rule as the crop: a preview that showed a camera move the export
+ * will not apply — or hid one it will — would be worse than no preview at
+ * all, so the fragment goes through the same compiler and the same
+ * independent filtergraph check, and is dropped on the same terms.
+ */
+function previewPerspectiveFragment(renderPlan: RenderPlan | undefined): {
+  fragment: string | null;
+  movesApplied: number;
+} {
+  if (!renderPlan || renderPlan.perspectiveMoves.length === 0) {
+    return { fragment: null, movesApplied: 0 };
+  }
+  const compiled = compilePerspectiveFilter({ moves: renderPlan.perspectiveMoves });
+  if (!compiled.filterFragment || !validateFilterGraph(compiled.filterFragment).ok) {
+    return { fragment: null, movesApplied: 0 };
+  }
+  return { fragment: compiled.filterFragment, movesApplied: compiled.movesApplied };
+}
+
+/**
  * The preview's illustrations, compiled exactly as the export compiles
  * them — only at preview resolution. With none to composite, the command
  * keeps its single input and its `-vf` chain; with any, the chain moves
@@ -285,9 +308,13 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
   }
 
   const resolvedCrop = previewCropFragment(crop, planIsValid ? renderPlan : undefined);
+  const resolvedPerspective = previewPerspectiveFragment(planIsValid ? renderPlan : undefined);
   const watermark = `drawtext=${drawtextFontFragment()}text='${escapeDrawtext(PREVIEW_WATERMARK_TEXT)}':fontcolor=white@0.85:fontsize=28:box=1:boxcolor=black@0.45:boxborderw=10:x=(w-text_w)/2:y=h-th-40`;
   const subtitles = assPath ? `ass='${escapeFilterPath(assPath)}',` : "";
-  const videoFilter = `${resolvedCrop.fragment},scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT},setsar=1,${subtitles}${watermark}`;
+  // The tilt sits after the scale and before the captions, exactly where
+  // the export puts it: the camera moves, the subtitles do not.
+  const perspective = resolvedPerspective.fragment ? `${resolvedPerspective.fragment},` : "";
+  const videoFilter = `${resolvedCrop.fragment},scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT},${perspective}setsar=1,${subtitles}${watermark}`;
 
   const overlays = previewOverlayArgs(videoFilter, planIsValid ? renderPlan : undefined, overlayFiles);
 
@@ -329,6 +356,7 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
       subtitles: assPath !== null,
       overlays: overlays.appliedCount,
       framing: resolvedCrop.framingApplied,
+      perspective: resolvedPerspective.movesApplied,
     },
   };
 }

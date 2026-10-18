@@ -108,6 +108,56 @@ export type FramingShotSource = "speaker" | "subject" | "manual";
 
 export const FRAMING_SHOT_SOURCES: FramingShotSource[] = ["speaker", "subject", "manual"];
 
+/**
+ * One stretch of the clip seen from a camera that moved in space: the 3D
+ * move.
+ *
+ * This is the only effect here that is not a flat transform. `perspective`
+ * maps a quadrilateral of the frame onto the output rectangle, so taking
+ * a trapezoid instead of a rectangle shows the frame as a plane tilted
+ * away from the viewer: the near edge covers less source blown up larger,
+ * the far edge stays as it was. That is a real projective transform, not
+ * a 2D squeeze faked to look like one — and because the quadrilateral is
+ * always *inside* the frame, every output pixel comes from real source
+ * pixels. No black wedge, no smeared edge, nothing invented.
+ *
+ * `direction` says which edge comes toward the viewer: "left" tilts the
+ * plane so its left edge is nearest, "up" so its top edge is. `profile`
+ * says how the tilt moves over the window — a swing that goes and comes
+ * back, a settle that lands flat, a lift that tips away. Times are
+ * clip-relative, like everything else in a RenderPlan, and outside its
+ * window a move applies nothing at all.
+ */
+export interface PerspectiveMove {
+  id: string;
+  startSec: number;
+  endSec: number;
+  /** Which edge of the frame comes toward the viewer. */
+  direction: PerspectiveDirection;
+  /** How the tilt evolves across the window. */
+  profile: PerspectiveProfile;
+  /** Strength in [PERSPECTIVE_AMOUNT_MIN, PERSPECTIVE_AMOUNT_MAX]; scaled by PERSPECTIVE_INSET_MAX. */
+  amount: number;
+}
+
+export type PerspectiveDirection = "left" | "right" | "up" | "down";
+export type PerspectiveProfile = "swing" | "settle" | "lift";
+
+export const PERSPECTIVE_DIRECTIONS: PerspectiveDirection[] = ["left", "right", "up", "down"];
+export const PERSPECTIVE_PROFILES: PerspectiveProfile[] = ["swing", "settle", "lift"];
+
+/**
+ * The axis a direction tilts around. Two moves on the same axis cannot
+ * overlap — the compiled expression resolves a frame to one tilt — but a
+ * horizontal and a vertical move may run together, and they compose into
+ * a diagonal tilt rather than fighting each other.
+ */
+export type PerspectiveAxis = "horizontal" | "vertical";
+
+export function perspectiveAxisOf(direction: PerspectiveDirection): PerspectiveAxis {
+  return direction === "left" || direction === "right" ? "horizontal" : "vertical";
+}
+
 export interface AudioDucking {
   enabled: boolean;
   /** Attenuation applied to background audio while speech is present, in dB (negative = quieter). */
@@ -126,6 +176,8 @@ export interface RenderPlan {
   overlays: Overlay[];
   /** Shots the crop follows, in chronological order; empty = one static crop. */
   framing: FramingShot[];
+  /** 3D moves applied over the clip, in chronological order; empty = a flat frame. */
+  perspectiveMoves: PerspectiveMove[];
   subtitleStyle: SubtitleStyle;
   safeZones: SafeZone[];
   audioDucking: AudioDucking;
@@ -184,6 +236,42 @@ export const FRAMING_TRANSITION_SEC_MAX = 1;
 /** A crop window smaller than this would upscale a patch of source past recognition. */
 export const FRAMING_MIN_SIZE = 0.05;
 export const FRAMING_LABEL_MAX_LENGTH = 40;
+
+/**
+ * 3D move bounds.
+ *
+ * `PERSPECTIVE_INSET_MAX` is the ceiling that matters: it is the fraction
+ * of the near edge the transform eats, so 0.22 means that edge shows 78%
+ * of its source stretched over the full output — a 1.28x upscale, on top
+ * of the roughly 1.8x the vertical crop already applies to a 1080p
+ * source. Past that the near edge visibly softens, and a 3D effect whose
+ * price is a blurry face is not worth having.
+ *
+ * The count is capped because each move adds a branch to the tilt
+ * expression, and that expression is substituted into four of the
+ * filter's eight corner coordinates — so the graph grows four times
+ * faster than the list, against validateFilterGraph's 8000-character
+ * ceiling.
+ */
+export const MAX_PERSPECTIVE_MOVES_PER_PLAN = 6;
+/** Below this, a tilt reads as a glitch rather than as a camera move. */
+export const MIN_PERSPECTIVE_MOVE_DURATION_SEC = 0.3;
+export const PERSPECTIVE_AMOUNT_MIN = 0.05;
+export const PERSPECTIVE_AMOUNT_MAX = 1;
+export const PERSPECTIVE_INSET_MAX = 0.22;
+/**
+ * The frame rate the clip is conformed to before the 3D filter runs.
+ *
+ * ffmpeg's `perspective` is the one filter in the chain whose expressions
+ * cannot read `t`: it only exposes the frame counter `on`. Rather than
+ * guess the source's rate — and drift on a variable-frame-rate download,
+ * which is most of YouTube — the chain pins the rate with an `fps` filter
+ * right before it, so frame `on` is exactly `on / PERSPECTIVE_EVAL_FPS`
+ * seconds into the clip. 30 is what short-form platforms deliver anyway;
+ * the cost is that a clip carrying a 3D move exports at 30 fps, and a
+ * clip carrying none is untouched.
+ */
+export const PERSPECTIVE_EVAL_FPS = 30;
 
 export const FONT_SIZE_SCALE_MIN = 0.7;
 export const FONT_SIZE_SCALE_MAX = 1.4;

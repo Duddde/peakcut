@@ -6,6 +6,10 @@ import {
   FRAMING_SHOT_SOURCES,
   type EffectTemplateId,
   type FramingShotSource,
+  PERSPECTIVE_DIRECTIONS,
+  PERSPECTIVE_PROFILES,
+  type PerspectiveDirection,
+  type PerspectiveProfile,
   type RenderPlan,
 } from "@/lib/effects/types";
 import type {
@@ -222,6 +226,32 @@ function parseRenderPlanInput(raw: unknown, field: string): RenderPlan | null {
           width: num(rect.width, `${at}.rect.width`),
           height: num(rect.height, `${at}.rect.height`),
         },
+      };
+    }),
+    // Absent on every plan saved before 3D moves existed, which must keep
+    // loading: no moves is a flat clip, not a malformed plan.
+    perspectiveMoves: arr(p.perspectiveMoves ?? [], `${field}.perspectiveMoves`).map((rawMove, i) => {
+      const at = `${field}.perspectiveMoves[${i}]`;
+      const m = obj(rawMove, at);
+      const direction = str(m.direction, `${at}.direction`);
+      const profile = str(m.profile, `${at}.profile`);
+      if (!PERSPECTIVE_DIRECTIONS.includes(direction as PerspectiveDirection)) {
+        throw new ProjectInputParseError(
+          `${at}.direction doit être l'un de : ${PERSPECTIVE_DIRECTIONS.join(", ")}.`
+        );
+      }
+      if (!PERSPECTIVE_PROFILES.includes(profile as PerspectiveProfile)) {
+        throw new ProjectInputParseError(
+          `${at}.profile doit être l'un de : ${PERSPECTIVE_PROFILES.join(", ")}.`
+        );
+      }
+      return {
+        id: str(m.id, `${at}.id`),
+        startSec: num(m.startSec, `${at}.startSec`),
+        endSec: num(m.endSec, `${at}.endSec`),
+        direction: direction as PerspectiveDirection,
+        profile: profile as PerspectiveProfile,
+        amount: num(m.amount, `${at}.amount`),
       };
     }),
     zoomKeyframes: arr(p.zoomKeyframes, `${field}.zoomKeyframes`).map((rawKf, i) => {

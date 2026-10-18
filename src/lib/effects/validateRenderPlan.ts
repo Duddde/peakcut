@@ -18,18 +18,25 @@ import {
   MARGIN_SCALE_MIN,
   MAX_FRAMING_SHOTS_PER_PLAN,
   MAX_OVERLAYS_PER_PLAN,
+  MAX_PERSPECTIVE_MOVES_PER_PLAN,
   MIN_CUT_DURATION_SEC,
   MIN_FRAMING_SHOT_DURATION_SEC,
   MIN_OVERLAY_DURATION_SEC,
+  MIN_PERSPECTIVE_MOVE_DURATION_SEC,
   OVERLAY_FADE_SEC_MAX,
   OVERLAY_FADE_SEC_MIN,
   OVERLAY_MIN_SIZE,
   OVERLAY_OPACITY_MAX,
   OVERLAY_OPACITY_MIN,
+  PERSPECTIVE_AMOUNT_MAX,
+  PERSPECTIVE_AMOUNT_MIN,
+  PERSPECTIVE_DIRECTIONS,
+  PERSPECTIVE_PROFILES,
   RELEASE_SEC_MAX,
   RELEASE_SEC_MIN,
   ZOOM_SCALE_MAX,
   ZOOM_SCALE_MIN,
+  perspectiveAxisOf,
   type RenderPlan,
 } from "./types";
 
@@ -189,6 +196,78 @@ function validateFraming(
   }
 }
 
+/**
+ * 3D moves, checked against the bounds the builder and the studio
+ * respect.
+ *
+ * The overlap rule is the one worth reading. Two moves on the same axis
+ * cannot overlap, because the compiled tilt expression resolves a frame
+ * to exactly one value and an overlap would make which move wins an
+ * accident of branch order. Two moves on *different* axes may overlap on
+ * purpose: a horizontal and a vertical tilt running together compose
+ * into a diagonal one, which is a camera move, not a conflict.
+ */
+function validatePerspectiveMoves(
+  plan: RenderPlan,
+  minCutStart: number,
+  maxCutEnd: number,
+  errors: string[]
+): void {
+  if (plan.perspectiveMoves.length > MAX_PERSPECTIVE_MOVES_PER_PLAN) {
+    errors.push(
+      `trop d'effets 3D : ${plan.perspectiveMoves.length} (maximum ${MAX_PERSPECTIVE_MOVES_PER_PLAN}).`
+    );
+  }
+
+  const seenIds = new Set<string>();
+  for (const move of plan.perspectiveMoves) {
+    const at = `effet 3D "${move.id}"`;
+
+    if (seenIds.has(move.id)) {
+      errors.push(`${at} : identifiant en double.`);
+    }
+    seenIds.add(move.id);
+
+    if (!PERSPECTIVE_DIRECTIONS.includes(move.direction)) {
+      errors.push(`${at} : direction inconnue ("${move.direction}").`);
+    }
+    if (!PERSPECTIVE_PROFILES.includes(move.profile)) {
+      errors.push(`${at} : profil inconnu ("${move.profile}").`);
+    }
+    if (!(move.amount >= PERSPECTIVE_AMOUNT_MIN && move.amount <= PERSPECTIVE_AMOUNT_MAX)) {
+      errors.push(
+        `${at} : intensité hors bornes [${PERSPECTIVE_AMOUNT_MIN}, ${PERSPECTIVE_AMOUNT_MAX}] : ${move.amount}.`
+      );
+    }
+
+    const duration = move.endSec - move.startSec;
+    if (move.startSec < 0) {
+      errors.push(`${at} : startSec négatif (${move.startSec}).`);
+    }
+    if (!(duration >= MIN_PERSPECTIVE_MOVE_DURATION_SEC)) {
+      errors.push(
+        `${at} : durée trop courte (< ${MIN_PERSPECTIVE_MOVE_DURATION_SEC}s) : ${move.startSec}s–${move.endSec}s.`
+      );
+    }
+    if (move.startSec < minCutStart || move.endSec > maxCutEnd) {
+      errors.push(`${at} : hors de la plage des coupes (${move.startSec}s–${move.endSec}s).`);
+    }
+  }
+
+  for (const axis of ["horizontal", "vertical"] as const) {
+    const onAxis = plan.perspectiveMoves
+      .filter((move) => perspectiveAxisOf(move.direction) === axis)
+      .sort((a, b) => a.startSec - b.startSec);
+    for (let i = 1; i < onAxis.length; i++) {
+      if (onAxis[i].startSec < onAxis[i - 1].endSec) {
+        errors.push(
+          `effets 3D qui se chevauchent sur le même axe : "${onAxis[i - 1].id}" (${onAxis[i - 1].startSec}s–${onAxis[i - 1].endSec}s) / "${onAxis[i].id}" (${onAxis[i].startSec}s–${onAxis[i].endSec}s).`
+        );
+      }
+    }
+  }
+}
+
 export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult {
   const errors: string[] = [];
 
@@ -259,6 +338,7 @@ export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult
 
   validateOverlays(plan, minCutStart, maxCutEnd, errors);
   validateFraming(plan, minCutStart, maxCutEnd, errors);
+  validatePerspectiveMoves(plan, minCutStart, maxCutEnd, errors);
 
   if (plan.safeZones.length === 0) {
     errors.push("safeZones ne doit pas être vide.");

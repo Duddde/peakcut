@@ -13,6 +13,11 @@ import { verifyExport } from "./verifyExport";
 import { createSyntheticVideo } from "../../../test/fixtures/createSyntheticVideo";
 import { createSplitVideo, VERTICAL_WINDOW_WIDTH } from "../../../test/fixtures/createSplitVideo";
 import { averageLuma } from "../../../test/fixtures/averageLuma";
+import {
+  createBandedVideo,
+  LEFT_COLUMN,
+  RIGHT_COLUMN,
+} from "../../../test/fixtures/createBandedVideo";
 import { buildRenderPlan } from "@/lib/effects/buildRenderPlan";
 
 describe("renderPreviewSegment (real ffmpeg + real ffprobe)", () => {
@@ -158,6 +163,58 @@ describe("renderPreviewSegment — cadrage par plans (real ffmpeg)", () => {
     expect(result.renderApplied.framing).toBe(2);
     expect(await averageLuma(outputPath, 0.5)).toBeGreaterThan(180);
     expect(await averageLuma(outputPath, 3)).toBeLessThan(80);
+
+    const verified = await verifyExport(outputPath);
+    expect(verified.width).toBe(PREVIEW_WIDTH);
+    expect(verified.height).toBe(PREVIEW_HEIGHT);
+    expect(verified.audioCodec).toBe("aac");
+  }, 120000);
+});
+
+describe("renderPreviewSegment \u2014 effets 3D (real ffmpeg)", () => {
+  let workDir: string;
+  let sourcePath: string;
+
+  beforeAll(async () => {
+    workDir = await mkdtemp(path.join(tmpdir(), "peakcut-preview-3d-"));
+    sourcePath = path.join(workDir, "banded.mp4");
+    await createBandedVideo(sourcePath, 5);
+  }, 60000);
+
+  afterAll(async () => {
+    if (workDir) await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("incline l'image comme l'export l'inclinera, au m\u00eame instant", async () => {
+    // Un aper\u00e7u qui montrerait un mouvement de cam\u00e9ra que l'export
+    // n'appliquera pas \u2014 ou qui cacherait celui qu'il appliquera \u2014 serait
+    // pire que pas d'aper\u00e7u du tout.
+    const outputPath = path.join(workDir, "preview-tilted.mp4");
+    const plan = buildRenderPlan("clean-captions", { segmentId: "seg-1", segmentDurationSec: 4 });
+
+    const result = await renderPreviewSegment({
+      inputMediaPath: sourcePath,
+      startSec: 0,
+      endSec: 4,
+      outputPath,
+      crop: { x: (1 - VERTICAL_WINDOW_WIDTH) / 2, y: 0, width: VERTICAL_WINDOW_WIDTH, height: 1 },
+      renderPlan: {
+        ...plan,
+        perspectiveMoves: [
+          { id: "m3d-1", startSec: 1, endSec: 3, direction: "left", profile: "swing", amount: 1 },
+        ],
+      },
+    });
+
+    expect(result.renderApplied.perspective).toBe(1);
+
+    const flatLeft = await averageLuma(outputPath, 0.4, LEFT_COLUMN);
+    const flatRight = await averageLuma(outputPath, 0.4, RIGHT_COLUMN);
+    expect(Math.abs(flatLeft - flatRight)).toBeLessThan(6);
+
+    const tiltedLeft = await averageLuma(outputPath, 2, LEFT_COLUMN);
+    const tiltedRight = await averageLuma(outputPath, 2, RIGHT_COLUMN);
+    expect(tiltedRight - tiltedLeft).toBeGreaterThan(6);
 
     const verified = await verifyExport(outputPath);
     expect(verified.width).toBe(PREVIEW_WIDTH);

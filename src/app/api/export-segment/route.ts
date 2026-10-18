@@ -151,6 +151,7 @@ export function createExportSegmentHandler(
           ducking: exportResult.renderApplied.ducking,
           overlays: exportResult.renderApplied.overlays,
           framing: exportResult.renderApplied.framing,
+          perspective: exportResult.renderApplied.perspective,
           template_id: exportResult.renderApplied.templateId,
         },
         render_limitations: [...exportResult.renderLimitations, ...overlayNote],

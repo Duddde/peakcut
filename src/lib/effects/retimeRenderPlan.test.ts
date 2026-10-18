@@ -222,3 +222,43 @@ describe("retimeRenderPlan — décalage du début du clip", () => {
     expect(validateRenderPlan(retimed).ok).toBe(true);
   });
 });
+
+describe("retimeRenderPlan \u2014 effets 3D", () => {
+  function planWithMoves() {
+    const plan = buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 60 });
+    return {
+      ...plan,
+      perspectiveMoves: [
+        { id: "a", startSec: 2, endSec: 4, direction: "left" as const, profile: "swing" as const, amount: 0.6 },
+        { id: "b", startSec: 30, endSec: 32, direction: "up" as const, profile: "settle" as const, amount: 0.8 },
+      ],
+    };
+  }
+
+  it("decale les mouvements quand le debut du clip bouge", () => {
+    const retimed = retimeRenderPlan(planWithMoves(), 40, 20);
+    expect(retimed.perspectiveMoves.map((m) => m.id)).toEqual(["b"]);
+    expect(retimed.perspectiveMoves[0].startSec).toBe(10);
+    expect(retimed.perspectiveMoves[0].endSec).toBe(12);
+    expect(validateRenderPlan(retimed).ok).toBe(true);
+  });
+
+  it("abandonne un mouvement que la coupe reduit a rien plutot que de le garder en soubresaut", () => {
+    const retimed = retimeRenderPlan(planWithMoves(), 2.1);
+    expect(retimed.perspectiveMoves.map((m) => m.id)).toEqual([]);
+    expect(validateRenderPlan(retimed).ok).toBe(true);
+  });
+
+  it("rogne un mouvement entame par la coupe et le garde valide", () => {
+    const retimed = retimeRenderPlan(planWithMoves(), 3);
+    expect(retimed.perspectiveMoves).toHaveLength(1);
+    expect(retimed.perspectiveMoves[0].endSec).toBe(3);
+    expect(validateRenderPlan(retimed).ok).toBe(true);
+  });
+
+  it("vide les mouvements d'un clip trop court pour porter une coupe", () => {
+    const retimed = retimeRenderPlan(planWithMoves(), 0.05);
+    expect(retimed.perspectiveMoves).toEqual([]);
+    expect(validateRenderPlan(retimed).ok).toBe(true);
+  });
+});

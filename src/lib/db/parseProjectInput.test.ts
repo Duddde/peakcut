@@ -339,6 +339,33 @@ describe("parseSegmentInput — plan d'effets", () => {
     expect(() => parseSegmentInput(segmentWith({ ...validPlan, framing }))).toThrow(ProjectInputParseError);
   });
 
+  it("accepts the 3D moves of a clip", () => {
+    const perspectiveMoves = [
+      { id: "m3d-1", startSec: 0, endSec: 0.6, direction: "left", profile: "settle", amount: 0.8 },
+      { id: "m3d-2", startSec: 10, endSec: 12, direction: "up", profile: "swing", amount: 0.4 },
+    ];
+    const parsed = parseSegmentInput(segmentWith({ ...validPlan, perspectiveMoves }));
+    expect(parsed.renderPlan?.perspectiveMoves).toHaveLength(2);
+    expect(parsed.renderPlan?.perspectiveMoves[1].direction).toBe("up");
+    expect(parsed.renderPlan?.perspectiveMoves[0].profile).toBe("settle");
+  });
+
+  it("treats a plan saved before 3D moves existed as a flat clip", () => {
+    const { perspectiveMoves: _omitted, ...beforeMoves } = validPlan;
+    expect(parseSegmentInput(segmentWith(beforeMoves)).renderPlan?.perspectiveMoves).toEqual([]);
+  });
+
+  it("refuses an unknown 3D direction or profile", () => {
+    for (const broken of [
+      [{ id: "m", startSec: 0, endSec: 1, direction: "vers-le-futur", profile: "swing", amount: 0.5 }],
+      [{ id: "m", startSec: 0, endSec: 1, direction: "left", profile: "teleportation", amount: 0.5 }],
+    ]) {
+      expect(() =>
+        parseSegmentInput(segmentWith({ ...validPlan, perspectiveMoves: broken }))
+      ).toThrow(ProjectInputParseError);
+    }
+  });
+
   it("never takes the limitations from the client: what the export cannot do is the server's word", () => {
     const parsed = parseSegmentInput(
       segmentWith({ ...validPlan, limitations: ["PeakCut fait absolument tout"] })

@@ -1,6 +1,11 @@
 import type { NormalizedRect, SafeZone, TranscriptWord, WorkflowState } from "@/lib/domain/types";
 import { parseWorkflowState } from "@/lib/workflow/parseWorkflowState";
-import { EFFECT_TEMPLATE_IDS, type FramingShot, type RenderPlan } from "@/lib/effects/types";
+import {
+  EFFECT_TEMPLATE_IDS,
+  type FramingShot,
+  type PerspectiveMove,
+  type RenderPlan,
+} from "@/lib/effects/types";
 
 export class ExportRequestParseError extends Error {
   constructor(message: string) {
@@ -164,6 +169,22 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     };
   });
 
+  // Same for the 3D moves: a plan saved before they existed has none,
+  // which means a flat clip. `direction` and `profile` are read as plain
+  // strings here and checked against the known lists by
+  // validateRenderPlan, with every other bound.
+  const perspectiveMoves = requireArray(plan.perspectiveMoves ?? [], "perspectiveMoves").map((raw, index) => {
+    const m = requireObject(raw, `perspectiveMoves[${index}]`);
+    return {
+      id: requireString(m.id, `perspectiveMoves[${index}].id`),
+      startSec: requireNumber(m.startSec, `perspectiveMoves[${index}].startSec`),
+      endSec: requireNumber(m.endSec, `perspectiveMoves[${index}].endSec`),
+      direction: requireString(m.direction, `perspectiveMoves[${index}].direction`) as PerspectiveMove["direction"],
+      profile: requireString(m.profile, `perspectiveMoves[${index}].profile`) as PerspectiveMove["profile"],
+      amount: requireNumber(m.amount, `perspectiveMoves[${index}].amount`),
+    };
+  });
+
   const styleRaw = requireObject(plan.subtitleStyle, "subtitleStyle");
   const subtitleStyle = {
     fontSizeScale: requireNumber(styleRaw.fontSizeScale, "subtitleStyle.fontSizeScale"),
@@ -207,6 +228,7 @@ function parseRenderPlan(raw: unknown): RenderPlan {
     zoomKeyframes,
     overlays,
     framing,
+    perspectiveMoves,
     subtitleStyle,
     safeZones,
     audioDucking,

@@ -2,11 +2,19 @@ import { buildDefaultSafeZones } from "@/lib/domain/defaultSafeZones";
 import type {
   AudioDucking,
   EffectTemplateId,
+  PerspectiveMove,
   RenderPlan,
   SubtitleStyle,
   ZoomKeyframe,
 } from "./types";
-import { ATTACK_SEC_MIN, MIN_CUT_DURATION_SEC, RELEASE_SEC_MIN, ZOOM_SCALE_MAX, ZOOM_SCALE_MIN } from "./types";
+import {
+  ATTACK_SEC_MIN,
+  MIN_CUT_DURATION_SEC,
+  MIN_PERSPECTIVE_MOVE_DURATION_SEC,
+  RELEASE_SEC_MIN,
+  ZOOM_SCALE_MAX,
+  ZOOM_SCALE_MIN,
+} from "./types";
 
 export interface BuildRenderPlanContext {
   segmentId: string;
@@ -21,10 +29,11 @@ const CUTS_LIMITATION =
   "Aucune détection automatique de coupes n'est effectuée : le plan couvre toujours l'intégralité du segment.";
 
 /**
- * What a plan still does not do. The zoom used to be listed here; it is
- * not any more, because exportSegment compiles these keyframes into a
- * real animated ffmpeg crop. When it cannot (no base crop, a plan that
- * fails validation), it says so itself, per export, in
+ * What a plan still does not do. The zoom used to be listed here, and so
+ * were the 3D effects; neither is any more, because exportSegment
+ * compiles the keyframes into a real animated ffmpeg crop and the 3D
+ * moves into a real animated `perspective`. When it cannot (no base crop,
+ * a plan that fails validation), it says so itself, per export, in
  * `renderLimitations` — a limitation that depends on the call does not
  * belong in a constant.
  */
@@ -41,8 +50,32 @@ function noDucking(): AudioDucking {
 interface TemplateOutput {
   intensity: number;
   zoomKeyframes: ZoomKeyframe[];
+  /**
+   * 3D moves the template puts in by itself. Only "hook-emphasis" does:
+   * its whole job is an opening that cannot be scrolled past, and a frame
+   * that drops into place is exactly that. The other three stay flat on
+   * purpose — a tilt on every clip would read as a filter applied to the
+   * batch rather than as an edit, and the studio's 3D panel is there for
+   * whoever wants more.
+   */
+  perspectiveMoves: PerspectiveMove[];
   subtitleStyle: SubtitleStyle;
   audioDucking: AudioDucking;
+}
+
+/**
+ * The opening tilt of "hook-emphasis": the frame starts rotated and lands
+ * flat over the first instants of the clip, while the zoom punches in.
+ *
+ * The direction is fixed rather than varied per clip, because a plan has
+ * to be reproducible — the same clip and the same template must give the
+ * same export, and a tilt that alternated would make two renders of one
+ * clip differ for no reason the user asked for.
+ */
+function hookPerspectiveMoves(durationSec: number): PerspectiveMove[] {
+  const endSec = Math.min(0.6, durationSec);
+  if (endSec < MIN_PERSPECTIVE_MOVE_DURATION_SEC) return [];
+  return [{ id: "hook-settle", startSec: 0, endSec, direction: "left", profile: "settle", amount: 0.8 }];
 }
 
 function buildSubtlePunch(durationSec: number): TemplateOutput {
@@ -58,6 +91,7 @@ function buildSubtlePunch(durationSec: number): TemplateOutput {
   return {
     intensity: 0.35,
     zoomKeyframes,
+    perspectiveMoves: [],
     subtitleStyle: {
       fontSizeScale: 1.0,
       primaryColorHex: "#FFFFFF",
@@ -88,6 +122,7 @@ function buildSpeakerFocus(durationSec: number, speakerChangeTimesSec?: number[]
   return {
     intensity: 0.5,
     zoomKeyframes,
+    perspectiveMoves: [],
     subtitleStyle: {
       fontSizeScale: 1.05,
       primaryColorHex: "#FFFFFF",
@@ -111,6 +146,7 @@ function buildHookEmphasis(durationSec: number): TemplateOutput {
   return {
     intensity: 0.7,
     zoomKeyframes,
+    perspectiveMoves: hookPerspectiveMoves(durationSec),
     subtitleStyle: {
       fontSizeScale: 1.25,
       primaryColorHex: "#FFD24D",
@@ -125,6 +161,7 @@ function buildCleanCaptions(_durationSec: number): TemplateOutput {
   return {
     intensity: 0.15,
     zoomKeyframes: [{ tSec: 0, scale: ZOOM_SCALE_MIN }],
+    perspectiveMoves: [],
     subtitleStyle: {
       fontSizeScale: 1.0,
       primaryColorHex: "#FFFFFF",
@@ -184,6 +221,10 @@ export function buildRenderPlan(templateId: EffectTemplateId, context: BuildRend
     // from the transcript alone. No shots means the clip keeps the
     // single crop its variant already carries.
     framing: [],
+    // A clip too short to carry a cut is too short to carry a camera
+    // move: the window would fall outside the plan's own cut range, which
+    // is what validateRenderPlan refuses.
+    perspectiveMoves: tooShortToEdit ? [] : output.perspectiveMoves,
     zoomKeyframes: tooShortToEdit ? [{ tSec: 0, scale: ZOOM_SCALE_MIN }] : output.zoomKeyframes,
     subtitleStyle: output.subtitleStyle,
     safeZones: buildDefaultSafeZones(context.segmentId),

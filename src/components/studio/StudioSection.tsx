@@ -22,6 +22,7 @@ import { VariantPicker } from "@/components/editor/VariantPicker";
 import { EffectsPanel } from "@/components/editor/EffectsPanel";
 import { FramingPanel } from "@/components/editor/FramingPanel";
 import { IllustrationsPanel } from "@/components/editor/IllustrationsPanel";
+import { PerspectivePanel } from "@/components/editor/PerspectivePanel";
 import { retimeSegment, splitSegment } from "@/lib/analysis/retimeSegment";
 import { AccountGate } from "@/components/AccountGate";
 import { PublicTrialNotice } from "@/components/PublicTrialNotice";
@@ -1432,6 +1433,12 @@ export function StudioSection({
             onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
           />
           <FramingPanel
+            segment={selectedSegment}
+            readOnly={isPublicDemo}
+            onReadOnlyAttempt={requireAccountForCustomization}
+            onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
+          />
+          <PerspectivePanel
             segment={selectedSegment}
             readOnly={isPublicDemo}
             onReadOnlyAttempt={requireAccountForCustomization}

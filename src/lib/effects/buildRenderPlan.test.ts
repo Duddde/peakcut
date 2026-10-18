@@ -144,3 +144,29 @@ describe("buildRenderPlan", () => {
     expect(validateRenderPlan(plan).ok).toBe(true);
   });
 });
+
+describe("buildRenderPlan \u2014 effets 3D", () => {
+  it("pose l'ouverture de hook-emphasis et laisse les autres modeles a plat", () => {
+    const hook = buildRenderPlan("hook-emphasis", { segmentId: "s", segmentDurationSec: 30 });
+    expect(hook.perspectiveMoves).toHaveLength(1);
+    expect(hook.perspectiveMoves[0]).toMatchObject({ startSec: 0, profile: "settle" });
+    expect(validateRenderPlan(hook).ok).toBe(true);
+
+    for (const templateId of ["subtle-punch", "speaker-focus", "clean-captions"] as const) {
+      const plan = buildRenderPlan(templateId, { segmentId: "s", segmentDurationSec: 30 });
+      expect(plan.perspectiveMoves).toEqual([]);
+    }
+  });
+
+  it("est deterministe : deux plans du meme clip portent le meme mouvement", () => {
+    const a = buildRenderPlan("hook-emphasis", { segmentId: "s", segmentDurationSec: 30 });
+    const b = buildRenderPlan("hook-emphasis", { segmentId: "s", segmentDurationSec: 30 });
+    expect(a.perspectiveMoves).toEqual(b.perspectiveMoves);
+  });
+
+  it("n'ouvre pas sur un mouvement qu'un clip tres court ne pourrait pas tenir", () => {
+    const plan = buildRenderPlan("hook-emphasis", { segmentId: "s", segmentDurationSec: 0.25 });
+    expect(plan.perspectiveMoves).toEqual([]);
+    expect(validateRenderPlan(plan).ok).toBe(true);
+  });
+});

@@ -220,4 +220,36 @@ describe("parseExportRequestBody — cadrage par plans", () => {
       ).toThrow(ExportRequestParseError);
     }
   });
+
+  it("parses the 3D moves of a clip", () => {
+    const perspectiveMoves = [
+      { id: "m3d-1", startSec: 0, endSec: 0.6, direction: "left", profile: "settle", amount: 0.8 },
+    ];
+    const result = parseExportRequestBody({
+      ...valid(),
+      renderPlan: { ...validRenderPlan(), perspectiveMoves },
+    });
+    expect(result.renderPlan?.perspectiveMoves).toHaveLength(1);
+    expect(result.renderPlan?.perspectiveMoves[0].profile).toBe("settle");
+  });
+
+  it("treats a plan without 3D moves as a flat clip", () => {
+    const result = parseExportRequestBody({ ...valid(), renderPlan: validRenderPlan() });
+    expect(result.renderPlan?.perspectiveMoves).toEqual([]);
+  });
+
+  it("throws when a 3D move is structurally broken", () => {
+    for (const broken of [
+      [{ id: "m", startSec: 0, endSec: 1, direction: "left", profile: "swing", amount: "beaucoup" }],
+      [{ id: 7, startSec: 0, endSec: 1, direction: "left", profile: "swing", amount: 0.5 }],
+      "plein de mouvements",
+    ]) {
+      expect(() =>
+        parseExportRequestBody({
+          ...valid(),
+          renderPlan: { ...validRenderPlan(), perspectiveMoves: broken },
+        })
+      ).toThrow(ExportRequestParseError);
+    }
+  });
 });

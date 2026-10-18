@@ -4,6 +4,7 @@ import type { NormalizedRect, TranscriptWord } from "@/lib/domain/types";
 import { buildAssSubtitles } from "./buildAssSubtitles";
 import { EXPORT_WIDTH, EXPORT_HEIGHT } from "./exportSpec";
 import { compileZoomFilter } from "@/lib/effects/compileZoomFilter";
+import { compilePerspectiveFilter } from "@/lib/effects/compilePerspectiveFilter";
 import { compileOverlayFilters, type OverlayInput } from "@/lib/effects/compileOverlayFilters";
 import { validateFilterGraph } from "@/lib/effects/validateFilterGraph";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
@@ -48,6 +49,8 @@ export interface RenderApplied {
   overlays: number;
   /** How many framing shots actually moved the crop; 0 means one static framing. */
   framing: number;
+  /** How many 3D moves actually tilted the frame; 0 means a flat frame throughout. */
+  perspective: number;
   templateId: string | null;
 }
 
@@ -178,12 +181,67 @@ function resolveOverlayInputs(
   return { inputs, notes };
 }
 
-function buildVideoFilter(assPath: string, resolved: ResolvedVideoFilter): string {
+interface ResolvedPerspective {
+  /** The fragment to splice into the chain, or null to leave the chain flat. */
+  fragment: string | null;
+  movesApplied: number;
+  notes: string[];
+}
+
+/**
+ * The 3D portion of the video filter.
+ *
+ * It is resolved apart from the crop because it does not need one: a
+ * clip exported without an explicit crop still goes through the default
+ * scale-then-crop, and tilting *that* frame is just as valid. The
+ * compiled fragment is handed to the independent filtergraph validator
+ * before use, like every other compiled fragment here, and a fragment
+ * that fails it is dropped — the clip then exports flat, and says so.
+ */
+function resolvePerspectiveFilter(
+  renderPlan: RenderPlan | undefined,
+  planIsValid: boolean
+): ResolvedPerspective {
+  if (!renderPlan || !planIsValid || renderPlan.perspectiveMoves.length === 0) {
+    return { fragment: null, movesApplied: 0, notes: [] };
+  }
+
+  const compiled = compilePerspectiveFilter({ moves: renderPlan.perspectiveMoves });
+  if (!compiled.filterFragment) {
+    return { fragment: null, movesApplied: 0, notes: compiled.notes };
+  }
+
+  const graphCheck = validateFilterGraph(compiled.filterFragment);
+  if (!graphCheck.ok) {
+    return {
+      fragment: null,
+      movesApplied: 0,
+      notes: [
+        ...compiled.notes,
+        `Effets 3D rejetés par la validation indépendante du filtergraph, image plate conservée : ${graphCheck.errors.join(" ")}`,
+      ],
+    };
+  }
+
+  return { fragment: compiled.filterFragment, movesApplied: compiled.movesApplied, notes: compiled.notes };
+}
+
+/**
+ * The 3D tilt runs after the crop and the scale, and before the
+ * subtitles: it is a camera move on the finished frame, so the captions
+ * have to stay flat and readable on top of it rather than tilt with it.
+ */
+function buildVideoFilter(
+  assPath: string,
+  resolved: ResolvedVideoFilter,
+  perspectiveFragment: string | null
+): string {
   const cropAndScale = resolved.includesFinalScale
     ? resolved.cropFragment
     : `${resolved.cropFragment},scale=${EXPORT_WIDTH}:${EXPORT_HEIGHT}`;
+  const perspective = perspectiveFragment ? `${perspectiveFragment},` : "";
   const escapedAssPath = escapeFfmpegFilterPath(assPath);
-  return `${cropAndScale},setsar=1,ass='${escapedAssPath}'`;
+  return `${cropAndScale},${perspective}setsar=1,ass='${escapedAssPath}'`;
 }
 
 interface OverlayArgs {
@@ -317,7 +375,8 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
   });
   await writeFile(assPath, assContent, "utf-8");
 
-  const videoFilter = buildVideoFilter(assPath, resolvedCrop);
+  const resolvedPerspective = resolvePerspectiveFilter(renderPlan, planIsValid);
+  const videoFilter = buildVideoFilter(assPath, resolvedCrop, resolvedPerspective.fragment);
   const overlays = buildOverlayArgs(videoFilter, renderPlan, planIsValid, input.overlayFiles);
 
   const renderApplied: RenderApplied = {
@@ -326,11 +385,13 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
     ducking: false,
     overlays: overlays.appliedCount,
     framing: resolvedCrop.framingApplied,
+    perspective: resolvedPerspective.movesApplied,
     templateId: renderPlan?.templateId ?? null,
   };
   const renderLimitations = [
     ...(renderPlan?.limitations ?? []),
     ...resolvedCrop.notes,
+    ...resolvedPerspective.notes,
     ...overlays.notes,
   ];
 

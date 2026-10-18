@@ -5,8 +5,10 @@ import {
   FRAMING_LABEL_MAX_LENGTH,
   MAX_FRAMING_SHOTS_PER_PLAN,
   MAX_OVERLAYS_PER_PLAN,
+  MAX_PERSPECTIVE_MOVES_PER_PLAN,
   type FramingShot,
   type Overlay,
+  type PerspectiveMove,
   type RenderPlan,
 } from "./types";
 
@@ -347,5 +349,103 @@ describe("validateRenderPlan — cadrage par plans", () => {
     const result = validateRenderPlan(plan);
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => /trop de plans de cadrage/i.test(e))).toBe(true);
+  });
+});
+
+describe("validateRenderPlan \u2014 effets 3D", () => {
+  function move(partial: Partial<PerspectiveMove> = {}): PerspectiveMove {
+    return {
+      id: "m3d-1",
+      startSec: 1,
+      endSec: 3,
+      direction: "left",
+      profile: "swing",
+      amount: 0.6,
+      ...partial,
+    };
+  }
+
+  it("accepte un mouvement dans les bornes", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move()];
+    expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+  });
+
+  it("refuse une direction inconnue", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ direction: "diagonale" as PerspectiveMove["direction"] })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /direction inconnue/i.test(e))).toBe(true);
+  });
+
+  it("refuse un profil inconnu", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ profile: "rebond" as PerspectiveMove["profile"] })];
+    expect(validateRenderPlan(plan).ok).toBe(false);
+  });
+
+  it("refuse une intensite hors bornes", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ amount: 3 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /intensit\u00e9 hors bornes/i.test(e))).toBe(true);
+  });
+
+  it("refuse un mouvement trop court pour etre vu", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ startSec: 1, endSec: 1.05 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /trop courte/i.test(e))).toBe(true);
+  });
+
+  it("refuse un mouvement qui sort de la plage des coupes", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ startSec: 9, endSec: 15 })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /hors de la plage des coupes/i.test(e))).toBe(true);
+  });
+
+  it("refuse deux mouvements qui se chevauchent sur le meme axe", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [
+      move({ id: "a", direction: "left", startSec: 1, endSec: 4 }),
+      move({ id: "b", direction: "right", startSec: 3, endSec: 6 }),
+    ];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /chevauchent sur le m\u00eame axe/i.test(e))).toBe(true);
+  });
+
+  it("accepte deux mouvements simultanes sur des axes differents", () => {
+    // Une inclinaison horizontale et une verticale se composent en une
+    // diagonale : c'est un mouvement de camera, pas un conflit.
+    const plan = validPlan();
+    plan.perspectiveMoves = [
+      move({ id: "a", direction: "left", startSec: 1, endSec: 4 }),
+      move({ id: "b", direction: "up", startSec: 1, endSec: 4 }),
+    ];
+    expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+  });
+
+  it("refuse deux mouvements qui partagent un identifiant", () => {
+    const plan = validPlan();
+    plan.perspectiveMoves = [move({ direction: "left" }), move({ direction: "up" })];
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /double/i.test(e))).toBe(true);
+  });
+
+  it("borne le nombre de mouvements", () => {
+    const plan = buildRenderPlan("subtle-punch", { segmentId: "seg-1", segmentDurationSec: 120 });
+    plan.perspectiveMoves = Array.from({ length: MAX_PERSPECTIVE_MOVES_PER_PLAN + 1 }, (_, i) =>
+      move({ id: `m${i}`, startSec: i * 3, endSec: i * 3 + 1 })
+    );
+    const result = validateRenderPlan(plan);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /trop d.effets 3D/i.test(e))).toBe(true);
   });
 });

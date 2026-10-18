@@ -16,6 +16,7 @@ PeakCut est un MVP de repurposing vidéo orienté Shorts. Il transforme un proje
 - Timeline éditable : clips placés à leur vraie position, rognage à la souris ou au clavier, découpe et suppression — avec re-découpage des sous-titres, re-score et réajustement des effets.
 - Illustrations par clip : image importée ou générée par IA, placée et minutée dans le studio, réellement incrustée par l'export et par l'aperçu.
 - Cadrage qui suit celui qui parle : chaque prise de parole diarisée est rapprochée du visage dont la bouche bouge, et le cadre change de plan en plan — réellement compilé par l’export et par l’aperçu, et modifiable dans le studio.
+- Effets 3D : l’image est reprojetée comme un plan incliné dans l’espace, par une vraie transformation de perspective animée — compilée par l’export et par l’aperçu, réglable mouvement par mouvement dans le studio.
 - Éditeur de démonstration : segments, timeline, texte et mots éditables, cadrage et safe zones pour les variantes 9:16, 1:1, 4:5 et 16:9.
 - Export FFmpeg réel depuis le fichier média du projet (import local ou vidéo YouTube téléchargée) : 1080×1920, H.264, AAC, sous-titres ASS mot-à-mot et vérification ffprobe.
 - Validation humaine par défaut ; aucune publication YouTube/TikTok n’est implémentée dans ce MVP.
@@ -359,6 +360,80 @@ détecteur local installé (voir plus haut), et au moins deux visages distincts
 dans la source. À défaut, le cadrage reste celui qui suit le visage détecté —
 ce qui est le bon résultat quand une seule personne parle.
 
+## Effets 3D : la caméra tourne autour du clip
+
+Un plan-poitrine fixe, même bien cadré et bien sous-titré, reste une image
+immobile pendant une minute. Le plan de rendu porte donc une liste de
+**mouvements 3D** (`renderPlan.perspectiveMoves`) : une fenêtre de temps, un
+sens, une forme de mouvement et une intensité.
+
+Ce qui se passe réellement, parce que « 3D » se dit facilement à tort. Le
+filtre `perspective` de FFmpeg prend quatre points **dans l’image** et les
+envoie aux quatre coins de la sortie. Avec les coins de l’image, il ne se passe
+rien. Avec un trapèze — un bord pincé, le bord opposé intact — la sortie
+montre ce trapèze étiré en rectangle, c’est-à-dire exactement ce que projette
+un plan incliné dans l’espace : le bord pincé couvre moins de source sur la
+même hauteur d’écran, donc il se lit comme le bord qui s’est approché. C’est
+une homographie, la même transformation projective qu’une vraie caméra
+applique — pas un écrasement 2D qui en imiterait l’effet.
+
+Deux propriétés sont voulues. Le quadrilatère est **toujours à l’intérieur**
+de l’image, donc chaque pixel de sortie vient de vrais pixels de source :
+jamais de coin noir, jamais de bord étiré, rien d’inventé. Et au repos le
+quadrilatère est l’image elle-même, donc un clip hors de toute fenêtre de
+mouvement rend exactement ce qu’il rendait avant que les effets 3D existent.
+
+Trois formes de mouvement, chacune pour un moment précis :
+
+- **balancement** — part à plat, s’incline, revient à plat. Il peut se poser
+  n’importe où dans un clip sans à-coup.
+- **atterrissage** — arrive incliné et se pose. Sa place est juste après une
+  coupe, là où l’à-coup est l’effet recherché.
+- **envol** — son miroir, qui quitte le plat. Il ne se lit bien qu’en fin de
+  clip.
+
+Seul le modèle `hook-emphasis` en ajoute de lui-même : un atterrissage sur ses
+premières six dixièmes de seconde, pendant que le zoom rentre. Les trois autres
+modèles restent à plat volontairement — une inclinaison sur chaque clip se
+verrait comme un filtre appliqué au lot, pas comme un montage — et le panneau
+« Effets 3D » du studio est là pour qui en veut plus : trois préréglages en un
+clic, puis le sens, la forme, l’intensité, le début et la durée de chaque
+mouvement. Les contrôles passent par `lib/effects/perspectiveEdits`, qui ne
+rend jamais une liste que le serveur refuserait.
+
+Les bornes, et pourquoi elles existent :
+
+- **Inclinaison maximale 0,22.** C’est la part du bord proche que la
+  transformation consomme : ce bord montre 78 % de sa source étirée sur toute
+  la sortie, soit un agrandissement de 1,28× par-dessus le ≈ 1,8× que le
+  recadrage vertical applique déjà à une source 1080p. Au-delà, le bord proche
+  ramollit visiblement, et un effet 3D payé d’un visage flou ne vaut pas la
+  peine.
+- **Six mouvements par clip.** Chaque mouvement ajoute une branche à
+  l’expression d’inclinaison, et cette expression est substituée dans quatre
+  des huit coins du filtre : le graphe grossit quatre fois plus vite que la
+  liste, face au plafond de 8000 caractères de la validation indépendante.
+- **Pas deux mouvements sur le même axe au même moment.** L’expression résout
+  une image à une seule inclinaison, donc un chevauchement laisserait l’ordre
+  des branches décider. Un mouvement horizontal et un vertical peuvent en
+  revanche tourner ensemble : ils se composent en une diagonale.
+
+Une contrainte technique mérite d’être dite, parce qu’elle se voit dans le
+fichier produit. `perspective` est le seul filtre de la chaîne dont les
+expressions ne peuvent pas lire le temps `t` : il n’expose que le compteur
+d’images `on`. Plutôt que de deviner la cadence de la source — et de dériver
+sur un téléchargement à cadence variable, ce qu’est la plupart de YouTube — la
+chaîne cale la cadence avec un filtre `fps` juste avant. Conséquence assumée :
+**un clip qui porte un mouvement 3D sort à 30 images/seconde** (ce que les
+plateformes de shorts diffusent de toute façon) ; un clip qui n’en porte aucun
+n’est pas touché du tout.
+
+Ce que ces effets ne font pas : il n’y a **aucune profondeur** dans l’image.
+L’image est traitée comme un plan unique, donc le visage ne se détache pas du
+décor et aucun réglage ne prétend le contraire. Un vrai parallaxe demanderait
+une carte de profondeur par image — c’est un autre chantier, et le panneau le
+dit à l’utilisateur plutôt que de le laisser croire.
+
 ## Timeline : rogner, couper, supprimer
 
 Les clips sont posés sur l’axe temporel de la source — à leur vraie place, donc
@@ -449,12 +524,22 @@ Short et vérifient réellement ses dimensions, codecs, audio et lisibilité via
 vision n’est pas installé (voir ci-dessus) — aucun média ou secret externe
 n’est requis pour faire passer la suite.
 
-Deux de ces tests valent d’être mentionnés, parce qu’ils mesurent un pixel
-plutôt qu’une intention : la source y est coupée en deux, blanche à gauche et
-noire à droite, et le test lit la **luminance moyenne** d’une image pendant
-chaque plan de cadrage. Une illustration qui n’apparaîtrait pas, ou un cadre
-qui ne basculerait pas sur l’autre visage, ferait échouer l’assertion — ce
-qu’un test de la seule valeur de retour laisserait passer.
+Quelques-uns de ces tests valent d’être mentionnés, parce qu’ils mesurent un
+pixel plutôt qu’une intention. Pour le cadrage, la source est coupée en deux,
+blanche à gauche et noire à droite, et le test lit la **luminance moyenne**
+d’une image pendant chaque plan : une illustration qui n’apparaîtrait pas, ou
+un cadre qui ne basculerait pas sur l’autre visage, ferait échouer
+l’assertion — ce qu’un test de la seule valeur de retour laisserait passer.
+
+Pour les effets 3D, la source est coupée en bandes horizontales, blanche en
+haut et noire en bas, et le test compare la luminance d’une **colonne étroite
+à chaque bord** de l’image. Une inclinaison autour de l’axe vertical pince un
+bord et laisse l’autre intact, donc elle déplace la ligne blanc/noir d’un côté
+seulement : deux colonnes égales signifient une image plate, un écart signifie
+qu’elle penche. Le même clip est mesuré avant, pendant et après le mouvement,
+ce qui vérifie du même coup que l’effet revient exactement à plat hors de sa
+fenêtre. L’aperçu a le même test, parce qu’un aperçu qui inclinerait
+autrement que l’export serait pire que pas d’aperçu.
 
 La partie Python de la détection a ses propres tests (identité d’un visage
 d’une image à l’autre, région de la bouche, activité labiale). Ils ne
@@ -524,7 +609,8 @@ par `/api/download-youtube` ci-dessus.
 - Le suivi de visage et le suivi du locuteur sont réels (OpenCV, cascade de Haar, plus l’activité labiale croisée à la diarisation). Le suivi d’objet et les effets avancés restent à intégrer derrière des adaptateurs de rendu testables.
 - Le cadrage suivi vaut pour une source filmée face caméra. Sur un partage d’écran, la cascade ne trouve que la webcam incrustée et le recadrage 9:16 cadre ce visage plutôt que le contenu montré — préférez-y `stable-center-fallback`, ou un recadrage manuel.
 - `gpt-4o-transcribe-diarize` renvoie des segments, pas des mots : les bornes mot-à-mot sont donc **interpolées** au prorata du nombre de caractères, et le surlignage des sous-titres dérive à l’intérieur d’un segment. L’API ne fournissant aucune confiance par mot, la valeur neutre de 0,5 est utilisée — ce qui déclenche sur chaque segment la pénalité « confiance de transcription faible » du scorer, uniformément.
-- Les effets réellement compilés par l’export sont le zoom animé, le style des sous-titres et les illustrations incrustées. Les effets 3D et le ducking audio sont déclarés dans le modèle mais pas encore appliqués : `renderPlan.limitations` dit précisément lesquels, sur chaque plan.
+- Les effets réellement compilés par l’export sont le zoom animé, le style des sous-titres, les illustrations incrustées, le cadrage par plans et les mouvements 3D. Le ducking audio reste déclaré et validé dans le modèle sans être appliqué au mixage : `renderPlan.limitations` le dit sur chaque plan.
+- Les effets 3D sont une perspective animée sur un plan unique : la caméra tourne, mais l’image n’a pas de profondeur et le visage ne se détache pas du décor. Un clip qui en porte un sort à 30 images/seconde, parce que le filtre lit un compteur d’images et non le temps.
 - Le cadrage suit le locuteur actif quand les trois conditions sont réunies (transcript diarisé, détecteur local, deux visages distincts) ; sinon il suit le visage détecté et le job de suivi dit laquelle manque. L’association voix-visage repose sur une corrélation entre diarisation et mouvement de la bouche, pas sur un modèle de détection de locuteur actif : elle refuse de trancher plus souvent qu’un tel modèle.
 - Les publications officielles nécessiteront OAuth, les permissions adéquates et une validation humaine explicite.
 

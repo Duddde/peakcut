@@ -2,9 +2,11 @@ import {
   MIN_CUT_DURATION_SEC,
   MIN_FRAMING_SHOT_DURATION_SEC,
   MIN_OVERLAY_DURATION_SEC,
+  MIN_PERSPECTIVE_MOVE_DURATION_SEC,
   ZOOM_SCALE_MIN,
   type FramingShot,
   type Overlay,
+  type PerspectiveMove,
   type RenderPlan,
 } from "./types";
 
@@ -62,6 +64,24 @@ function retimeFraming(framing: FramingShot[], lastEnd: number): FramingShot[] {
 }
 
 /**
+ * 3D moves follow the clip the same way illustrations do: one the trim
+ * cuts into keeps whatever window is left and replays its profile over
+ * it, and one left too short to be seen is dropped rather than kept as a
+ * lurch. Unlike a framing shot, a dropped move costs nothing structural —
+ * the frame goes back to flat, which is what a clip without 3D does.
+ */
+function retimePerspectiveMoves(moves: PerspectiveMove[], lastEnd: number): PerspectiveMove[] {
+  const retimed: PerspectiveMove[] = [];
+  for (const move of moves) {
+    const startSec = clampToClip(move.startSec, lastEnd);
+    const endSec = clampToClip(move.endSec, lastEnd);
+    if (endSec - startSec < MIN_PERSPECTIVE_MOVE_DURATION_SEC) continue;
+    retimed.push({ ...move, startSec, endSec });
+  }
+  return retimed;
+}
+
+/**
  * Re-fits a clip's plan to a new clip duration.
  *
  * A RenderPlan's times are clip-relative: a cut of 0→60 s and keyframes
@@ -92,7 +112,14 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number, offsetSe
 
   if (duration < MIN_CUT_DURATION_SEC) {
     // Too short to carry a cut at all; same degradation buildRenderPlan applies.
-    return { ...plan, cuts: [], zoomKeyframes: [{ tSec: 0, scale: ZOOM_SCALE_MIN }], overlays: [], framing: [] };
+    return {
+      ...plan,
+      cuts: [],
+      zoomKeyframes: [{ tSec: 0, scale: ZOOM_SCALE_MIN }],
+      overlays: [],
+      framing: [],
+      perspectiveMoves: [],
+    };
   }
 
   const cuts = plan.cuts
@@ -122,6 +149,14 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number, offsetSe
     ),
     framing: retimeFraming(
       plan.framing.map((shot) => ({ ...shot, startSec: shot.startSec - offset, endSec: shot.endSec - offset })),
+      lastEnd
+    ),
+    perspectiveMoves: retimePerspectiveMoves(
+      plan.perspectiveMoves.map((move) => ({
+        ...move,
+        startSec: move.startSec - offset,
+        endSec: move.endSec - offset,
+      })),
       lastEnd
     ),
     // A clip always keeps at least one keyframe: an empty list would make
