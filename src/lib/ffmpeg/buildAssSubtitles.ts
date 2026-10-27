@@ -1,5 +1,7 @@
 import type { TranscriptWord } from "@/lib/domain/types";
 import { EMOTION_WORDS, HOOK_KEYWORDS, normalizeWord } from "@/lib/scoring/lexicon";
+import { compileMotionAss } from "@/lib/motion/compileMotionAss";
+import type { MotionCard } from "@/lib/motion/types";
 
 export interface BuildAssOptions {
   videoWidth: number;
@@ -20,6 +22,8 @@ export interface BuildAssOptions {
   marginVerticalScale?: number;
   /** When true, words matching the scoring hook/emotion lexicon are bolded and enlarged in the burned-in captions. */
   emphasizeKeywords?: boolean;
+  /** Claude Motion cards, clip-relative, drawn as animated events of the same track. */
+  motionCards?: MotionCard[];
 }
 
 const DEFAULT_ASS_PRIMARY_COLOR = "&H00FFFFFF";
@@ -75,6 +79,14 @@ export function buildAssSubtitles(words: TranscriptWord[], options: BuildAssOpti
   const baseOffsetSec = options.baseOffsetSec ?? 0;
   const primaryColor = hexToAssPrimaryColor(options.primaryColorHex);
   const emphasizeKeywords = options.emphasizeKeywords ?? false;
+  // Cards take the captions' colour as their accent, unless the captions
+  // are plain white: one look per edit.
+  const motion = compileMotionAss(options.motionCards ?? [], {
+    videoWidth,
+    videoHeight,
+    accentHex:
+      options.primaryColorHex && options.primaryColorHex.toUpperCase() !== "#FFFFFF" ? options.primaryColorHex : undefined,
+  });
 
   const header = `[Script Info]
 Title: PeakCut word-by-word captions
@@ -86,7 +98,7 @@ PlayResY: ${videoHeight}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,${fontSize},${primaryColor},&H000000FF,&H00101010,&H80000000,1,0,0,0,100,100,0,0,1,3,1,2,60,60,${marginVertical},1
+Style: Default,Arial,${fontSize},${primaryColor},&H000000FF,&H00101010,&H80000000,1,0,0,0,100,100,0,0,1,3,1,2,60,60,${marginVertical},1${motion.styles.map((line) => `\n${line}`).join("")}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
@@ -102,5 +114,5 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
     });
 
-  return [header, ...dialogueLines].join("\n") + "\n";
+  return [header, ...dialogueLines, ...motion.events].join("\n") + "\n";
 }

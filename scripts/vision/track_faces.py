@@ -35,9 +35,15 @@ short follow the person who is actually talking:
     everyone speaking at once.
 
 `activity` is a measurement, not a verdict: nothing here decides who the
-speaker is. Matching a voice to a face is done later, against the
-transcript's diarized turns (see lib/tracking/assignSpeakersToFaces.ts),
-and refuses to answer when the two faces moved about equally.
+speaker is. That is decided later, shot by shot, by comparing the faces
+on screen at the same moment while someone is speaking (see
+lib/tracking/buildFaceFraming.ts).
+
+The camera cuts of an edited video are reported as well (`cuts`, in
+seconds): the frame has to change exactly there, and a face seen before a
+cut is not the face at the same place after it. On a cut, tracks are
+ended and faces are detected on the new shot at once. Faces are looked
+for from the front first, then in profile, which a close-up shows often.
 
 FFmpeg is already a hard requirement of PeakCut's export path; detection
 still runs fully offline, locally, on-device.
@@ -50,7 +56,8 @@ Output contract (and ONLY this goes to stdout):
         {"source": {"width": W, "height": H, "duration_sec": D},
          "detections": [{"tSec": t, "x": x, "y": y, "width": w, "height": h,
                           "confidence": c, "kind": "face",
-                          "track_id": "t1", "activity": a}, ...]}
+                          "track_id": "t1", "activity": a}, ...],
+         "cuts": [t, ...]}
     Failure (exit 1):
         {"error": "human-readable message"}
 
@@ -83,6 +90,22 @@ MAX_TRACK_MISSES = 4
 # region is enough to tell a moving mouth from a still one.
 MOUTH_X0, MOUTH_X1 = 0.25, 0.75
 MOUTH_Y0, MOUTH_Y1 = 0.60, 0.95
+
+# A camera cut, as seen between two decoded frames: the whole picture
+# changes at once, then holds. Measured on an edited show (median frame
+# difference 0.014, cuts 0.15-0.7) and on a streamer's montage, a cut is a
+# spike on one frame pair, at least CUT_MIN_DIFFERENCE of full scale and
+# CUT_SPIKE_RATIO times both of its neighbours. The ratio is what tells a
+# cut from a big gesture or a camera move, which reach the same amplitude
+# but spread it over several consecutive frames.
+#
+# A grey-level histogram is no help here: on a dark set lit the same way
+# from every angle, two different shots have near-identical histograms.
+CUT_MIN_DIFFERENCE = 0.08
+CUT_SPIKE_RATIO = 2.5
+# Floor for the neighbours in the ratio: next to a perfectly still frame,
+# any flicker would otherwise be "infinitely" larger than its neighbours.
+CUT_NEIGHBOUR_FLOOR = 0.01
 
 
 def emit_error(message: str) -> None:
@@ -209,6 +232,40 @@ def close_activity_window(tracks) -> None:
         track["count"] = 0
 
 
+def is_cut(before: float, spike: float, after: float) -> bool:
+    """Whether the frame pair measured `spike` is a camera cut, given the pairs on either side of it."""
+    neighbour = max(before, after, CUT_NEIGHBOUR_FLOOR)
+    return spike >= CUT_MIN_DIFFERENCE and spike >= CUT_SPIKE_RATIO * neighbour
+
+
+def detect_faces(cv2, gray, frontal, profile):
+    """
+    Faces in one frame: frontal first, then — only when no face is seen
+    from the front — in profile, looking both ways.
+
+    An interview cut in close-ups shows people side-on a good part of the
+    time, and the frontal cascade sees nothing there: the shot would then
+    keep whatever framing came before it, typically the other person's.
+    The profile cascade only finds faces turned to one side, so the frame
+    is mirrored to find the other one, and its boxes are mirrored back.
+    """
+    faces, _levels, weights = frontal.detectMultiScale3(gray, scaleFactor=1.1, minNeighbors=5, outputRejectLevels=True)
+    found = [(tuple(int(v) for v in face), float(weight)) for face, weight in zip(faces, weights)]
+    if found or profile is None:
+        return found
+
+    width = gray.shape[1]
+    for mirrored in (False, True):
+        image = cv2.flip(gray, 1) if mirrored else gray
+        faces, _levels, weights = profile.detectMultiScale3(image, scaleFactor=1.1, minNeighbors=5, outputRejectLevels=True)
+        for face, weight in zip(faces, weights):
+            fx, fy, fw, fh = (int(v) for v in face)
+            if mirrored:
+                fx = width - fx - fw
+            found.append(((fx, fy, fw, fh), float(weight)))
+    return found
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         emit_error("usage: track_faces.py <media_path> [detect_fps] [activity_fps]")
@@ -251,6 +308,10 @@ def main() -> int:
     if face_cascade.empty():
         emit_error("Le classifieur Haar frontal d'OpenCV est introuvable ou n'a pas pu etre charge.")
         return 1
+    # Optional: without it, faces seen side-on are simply not found, as before.
+    profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
+    if profile_cascade.empty():
+        profile_cascade = None
 
     det_w, det_h = detect_size(width, height)
     frame_bytes = det_w * det_h
@@ -278,9 +339,13 @@ def main() -> int:
         return 1
 
     detections = []
+    cuts = []
     tracks = {}
     next_track_number = 1
     previous_gray = None
+    # Frame differences of the last two pairs: a pair is judged a cut only
+    # once the pair after it is known (see is_cut).
+    recent_levels = []
     frame_index = 0
     try:
         while True:
@@ -289,19 +354,31 @@ def main() -> int:
                 break
             gray = np.frombuffer(raw, dtype=np.uint8).reshape((det_h, det_w))
 
-            if previous_gray is not None and tracks:
-                accumulate_activity(cv2.absdiff(gray, previous_gray), tracks, det_w, det_h)
+            cut_now = False
+            difference = None
+            if previous_gray is not None:
+                difference = cv2.absdiff(gray, previous_gray)
+                level = float(difference.mean()) / 255.0
+                if len(recent_levels) == 2 and is_cut(recent_levels[0], recent_levels[1], level):
+                    cut_now = True
+                    cuts.append(round((frame_index - 1) / activity_fps, 3))
+                recent_levels = (recent_levels + [level])[-2:]
 
-            if frame_index % stride == 0:
+            if cut_now:
+                # Every face of the previous shot is gone: its tracks end
+                # here, and the new shot is looked at right away rather
+                # than up to a detection interval later.
+                close_activity_window(tracks)
+                tracks.clear()
+            elif difference is not None and tracks:
+                accumulate_activity(difference, tracks, det_w, det_h)
+
+            if frame_index % stride == 0 or cut_now:
                 close_activity_window(tracks)
 
-                faces, _reject_levels, level_weights = face_cascade.detectMultiScale3(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=5,
-                    outputRejectLevels=True,
-                )
-                boxes = [tuple(int(v) for v in face) for face in faces]
+                found = detect_faces(cv2, gray, face_cascade, profile_cascade)
+                boxes = [box for box, _weight in found]
+                level_weights = [weight for _box, weight in found]
                 assignments, next_track_number = match_detections(
                     tracks, boxes, det_w, det_h, next_track_number
                 )
@@ -365,6 +442,7 @@ def main() -> int:
     result = {
         "source": {"width": width, "height": height, "duration_sec": round(duration_sec, 3)},
         "detections": detections,
+        "cuts": cuts,
     }
     print(json.dumps(result))
     return 0

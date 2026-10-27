@@ -3,6 +3,7 @@ import {
   OpenCvEngineExecutionError,
   OpenCvEngineInvalidOutputError,
   parseOpenCvOutput,
+  parseOpenCvSceneOutput,
 } from "./OpenCvFaceDetectionEngine";
 
 function validPayload() {
@@ -128,6 +129,27 @@ describe("parseOpenCvOutput — identité et activité labiale", () => {
       OpenCvEngineInvalidOutputError
     );
     expect(() => parseOpenCvOutput(JSON.stringify(payloadWith({ track_id: 3 })))).toThrow(
+      OpenCvEngineInvalidOutputError
+    );
+  });
+});
+
+describe("parseOpenCvSceneOutput — coupes de caméra", () => {
+  it("returns the camera cuts alongside the detections", () => {
+    const result = parseOpenCvSceneOutput(JSON.stringify({ ...validPayload(), cuts: [1.2, 3.4] }));
+    expect(result.cuts).toEqual([1.2, 3.4]);
+    expect(result.detections).toHaveLength(2);
+  });
+
+  it("reads a script from before cuts existed as a video without cuts", () => {
+    expect(parseOpenCvSceneOutput(JSON.stringify(validPayload())).cuts).toEqual([]);
+  });
+
+  it("rejects cuts that are not positive seconds", () => {
+    expect(() => parseOpenCvSceneOutput(JSON.stringify({ ...validPayload(), cuts: [-1] }))).toThrow(
+      OpenCvEngineInvalidOutputError
+    );
+    expect(() => parseOpenCvSceneOutput(JSON.stringify({ ...validPayload(), cuts: "1.2" }))).toThrow(
       OpenCvEngineInvalidOutputError
     );
   });

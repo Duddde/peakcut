@@ -19,10 +19,19 @@ import { SqliteAssetRepository } from "@/lib/assets/AssetRepository";
 import { defaultAssetsBaseDir } from "@/lib/assets/assetStore";
 import { resolveOverlayFiles } from "@/lib/assets/resolveOverlayFiles";
 import type { NormalizedRect, Segment, TranscriptWord } from "@/lib/domain/types";
+import { parseSegmentInput, ProjectInputParseError } from "@/lib/db/parseProjectInput";
 import type { RenderPlan } from "@/lib/effects/types";
 
 const execFileAsync = promisify(execFile);
 const MAX_DURATION_SEC = 15;
+/**
+ * An account previews the whole clip, not a teaser: it is how the edit is
+ * checked before (or instead of) a full render. The cap sits above the
+ * longest clip the cutter proposes (IDEAL_MAX_SEC, 95 s) and only bounds a
+ * hand-stretched one.
+ */
+export const ACCOUNT_PREVIEW_MAX_DURATION_SEC = 120;
+/** Applies to a caller-supplied upload path only; a project's own source is the server's file. */
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 export interface PreviewHandlerOptions {
@@ -64,13 +73,22 @@ async function probeDuration(sourcePath: string): Promise<number> {
  * Resolves a project-scoped preview request (`{ projectId, segmentId }`):
  * the caller — an account, or a public-trial actor when
  * PEAKCUT_PUBLIC_TRIAL=1 — must own the project (404 otherwise, like every
- * project route). The preview window is the segment's start plus at most
- * MAX_DURATION_SEC. A trial is additionally capped per window.
+ * project route). A trial previews the segment's start plus at most
+ * MAX_DURATION_SEC, and is additionally capped per window; an account
+ * previews the whole segment, up to ACCOUNT_PREVIEW_MAX_DURATION_SEC.
+ *
+ * `segment` may carry the studio's current, unsaved version of the clip
+ * (bounds, words, framing, effects), so that the preview follows the edit
+ * without a save first. It only ever replaces *what* is rendered: the
+ * media still comes from the project's own source, and illustrations are
+ * still resolved among this project's assets.
  */
 interface ProjectPreview {
   sourcePath: string;
   startSec: number;
   endSec: number;
+  /** The longest window this caller may preview. */
+  maxDurationSec: number;
   /** The variant's framing — what makes the preview vertical and on the speaker. */
   crop?: NormalizedRect;
   words: TranscriptWord[];
@@ -106,7 +124,19 @@ async function resolveProjectPreview(
   const project = ownerId !== null && ownerId === actor.user.id ? repo.getProjectById(projectId) : null;
   if (!project) return NextResponse.json({ ok: false, error: "Projet introuvable." }, { status: 404 });
 
-  const segment = project.segments.find((s) => s.id === body.segmentId);
+  let segment: Segment | undefined;
+  if (body.segment !== undefined) {
+    try {
+      segment = parseSegmentInput(body.segment);
+    } catch (err) {
+      if (err instanceof ProjectInputParseError) {
+        return NextResponse.json({ ok: false, error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+  } else {
+    segment = project.segments.find((s) => s.id === body.segmentId);
+  }
   if (!segment) return NextResponse.json({ ok: false, error: "Segment introuvable." }, { status: 404 });
 
   const localPath = project.source.localFilePath;
@@ -126,10 +156,12 @@ async function resolveProjectPreview(
     }
   }
 
+  const maxDurationSec = actor.kind === "trial" ? MAX_DURATION_SEC : ACCOUNT_PREVIEW_MAX_DURATION_SEC;
   return {
     sourcePath,
     startSec: segment.startSec,
-    endSec: Math.min(segment.endSec, segment.startSec + MAX_DURATION_SEC),
+    endSec: Math.min(segment.endSec, segment.startSec + maxDurationSec),
+    maxDurationSec,
     crop: pickVariant(segment, body.variantId)?.crop,
     words: segment.words,
     renderPlan: segment.renderPlan ?? undefined,
@@ -164,8 +196,8 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
     let endSec: number | null;
     let projectPreview: ProjectPreview | null = null;
     if (typeof body.projectId === "string") {
-      // Project mode: the source and bounds come from the caller's own
-      // project in the DB, never from the request body.
+      // Project mode: the source comes from the caller's own project in
+      // the DB, never from the request body.
       const resolved = await resolveProjectPreview(request, body, options);
       if (resolved instanceof NextResponse) return resolved;
       projectPreview = resolved;
@@ -179,11 +211,15 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
     if (startSec === null || endSec === null || startSec < 0 || endSec <= startSec) {
       return NextResponse.json({ ok: false, error: "Bornes d'aperçu invalides." }, { status: 400 });
     }
-    if (endSec - startSec > MAX_DURATION_SEC) return NextResponse.json({ ok: false, error: "L'aperçu gratuit est limité à 15 secondes." }, { status: 422 });
+    const maxDurationSec = projectPreview?.maxDurationSec ?? MAX_DURATION_SEC;
+    if (endSec - startSec > maxDurationSec) return NextResponse.json({ ok: false, error: `L'aperçu est limité à ${maxDurationSec} secondes.` }, { status: 422 });
     let sourceInfo;
     try {
       sourceInfo = await stat(sourcePath);
-      if (!sourceInfo.isFile() || sourceInfo.size > MAX_FILE_BYTES) return NextResponse.json({ ok: false, error: "Média invalide ou trop volumineux." }, { status: 422 });
+      // A downloaded video easily weighs several hundred MB, and the
+      // preview only seeks into it: the size cap guards uploads alone.
+      const tooLarge = !projectPreview && sourceInfo.size > MAX_FILE_BYTES;
+      if (!sourceInfo.isFile() || tooLarge) return NextResponse.json({ ok: false, error: "Média invalide ou trop volumineux." }, { status: 422 });
     } catch {
       return NextResponse.json({ ok: false, error: "Média source introuvable." }, { status: 404 });
     }
@@ -210,6 +246,7 @@ export function createPreviewSegmentHandler(options: PreviewHandlerOptions) {
           words: projectPreview.words,
           renderPlan: projectPreview.renderPlan,
           overlayFiles: projectPreview.overlayFiles,
+          maxDurationSec: projectPreview.maxDurationSec,
         }));
       } else {
         // drawtext needs a real font file: left to fontconfig, it segfaults

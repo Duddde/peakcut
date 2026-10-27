@@ -34,11 +34,14 @@ export const CHAIN_PAYLOAD_KEY = "__chain";
  * media file, analysis needs the transcript, tracking needs the segments
  * analysis produced (it rewrites each segment's crop).
  *
+ * "motion" (Claude Motion) closes the pipeline when Claude is configured:
+ * the cards are designed on the final clips, once cut and framed.
+ *
  * "render" is deliberately absent. Rendering every candidate would spend
  * minutes of ffmpeg per clip on cuts the editor has not looked at yet —
  * and the point of the editor is that they get to change them first.
  */
-export const AUTO_PIPELINE_ORDER: JobKind[] = ["download", "transcription", "analysis", "tracking"];
+export const AUTO_PIPELINE_ORDER: JobKind[] = ["download", "transcription", "analysis", "tracking", "motion"];
 
 export interface ChainStep {
   kind: JobKind;
@@ -52,6 +55,13 @@ export interface AutoPipelineOptions {
   trackProvider?: string;
   /** Re-cut the segments from the transcript instead of only rescoring existing ones. */
   resegment?: boolean;
+  /**
+   * Add the Claude Motion step. Decided by the server (is Claude
+   * configured?), never by the client: without a credential the step
+   * could only fail, and the pipeline would end on an error after the
+   * clips were in fact ready.
+   */
+  motion?: boolean;
 }
 
 export class ChainConfigurationError extends Error {
@@ -90,6 +100,9 @@ export function buildAutoPipelineChain(fromKind: JobKind, options: AutoPipelineO
         break;
       case "tracking":
         steps.push({ kind, payload: options.trackProvider ? { provider: options.trackProvider } : {} });
+        break;
+      case "motion":
+        if (options.motion) steps.push({ kind, payload: {} });
         break;
       default:
         steps.push({ kind, payload: {} });

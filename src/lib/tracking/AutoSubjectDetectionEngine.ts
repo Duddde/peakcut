@@ -1,6 +1,6 @@
 import { CommandSubjectDetectionEngine } from "./CommandSubjectDetectionEngine";
 import { OpenCvFaceDetectionEngine } from "./OpenCvFaceDetectionEngine";
-import type { DetectedBoundingBox, SubjectDetectionEngine, SubjectDetectionInput } from "./types";
+import type { DetectedBoundingBox, SceneDetection, SubjectDetectionEngine, SubjectDetectionInput } from "./types";
 
 export class SubjectDetectionUnavailableError extends Error {
   constructor() {
@@ -44,13 +44,19 @@ export class AutoSubjectDetectionEngine implements SubjectDetectionEngine {
   }
 
   async detect(input: SubjectDetectionInput): Promise<DetectedBoundingBox[]> {
+    return (await this.detectScene(input)).detections;
+  }
+
+  async detectScene(input: SubjectDetectionInput): Promise<SceneDetection> {
     if (process.env.PEAKCUT_TRACKER_COMMAND) {
-      return this.commandEngineFactory().detect(input);
+      return { detections: await this.commandEngineFactory().detect(input), cuts: [] };
     }
 
     const openCv = this.openCvEngineFactory();
     if (await openCv.isAvailable()) {
-      return openCv.detect(input);
+      return openCv.detectScene
+        ? openCv.detectScene(input)
+        : { detections: await openCv.detect(input), cuts: [] };
     }
 
     throw new SubjectDetectionUnavailableError();

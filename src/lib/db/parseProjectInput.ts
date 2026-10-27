@@ -1,4 +1,10 @@
 import { parseWorkflowState } from "@/lib/workflow/parseWorkflowState";
+import {
+  MOTION_CARD_KINDS,
+  MOTION_CARD_POSITIONS,
+  type MotionCardKind,
+  type MotionCardPosition,
+} from "@/lib/motion/types";
 import { validateRenderPlan } from "@/lib/effects/validateRenderPlan";
 import { COMMON_LIMITATIONS } from "@/lib/effects/buildRenderPlan";
 import {
@@ -252,6 +258,29 @@ function parseRenderPlanInput(raw: unknown, field: string): RenderPlan | null {
         direction: direction as PerspectiveDirection,
         profile: profile as PerspectiveProfile,
         amount: num(m.amount, `${at}.amount`),
+      };
+    }),
+    // Absent on plans saved before Claude Motion: no cards, not malformed.
+    motion: arr(p.motion ?? [], `${field}.motion`).map((rawCard, i) => {
+      const at = `${field}.motion[${i}]`;
+      const c = obj(rawCard, at);
+      const kind = str(c.kind, `${at}.kind`);
+      const position = str(c.position, `${at}.position`);
+      if (!MOTION_CARD_KINDS.includes(kind as MotionCardKind)) {
+        throw new ProjectInputParseError(`${at}.kind doit être l'un de : ${MOTION_CARD_KINDS.join(", ")}.`);
+      }
+      if (!MOTION_CARD_POSITIONS.includes(position as MotionCardPosition)) {
+        throw new ProjectInputParseError(`${at}.position doit être l'un de : ${MOTION_CARD_POSITIONS.join(", ")}.`);
+      }
+      return {
+        id: str(c.id, `${at}.id`),
+        kind: kind as MotionCardKind,
+        text: str(c.text, `${at}.text`),
+        detail: c.detail === null || c.detail === undefined ? null : str(c.detail, `${at}.detail`),
+        items: arr(c.items ?? [], `${at}.items`).map((item, j) => str(item, `${at}.items[${j}]`)),
+        startSec: num(c.startSec, `${at}.startSec`),
+        endSec: num(c.endSec, `${at}.endSec`),
+        position: position as MotionCardPosition,
       };
     }),
     zoomKeyframes: arr(p.zoomKeyframes, `${field}.zoomKeyframes`).map((rawKf, i) => {

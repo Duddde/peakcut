@@ -7,6 +7,7 @@ import {
   segmentTranscript,
   selectNonOverlapping,
   splitIntoSentenceUnits,
+  turnBoundaries,
 } from "./segmentTranscript";
 
 function word(text: string, startSec: number, endSec: number, speaker = "A", confidence = 0.95): TranscriptWord {
@@ -217,5 +218,78 @@ describe("segmentTranscript", () => {
     });
     expect(segments[0].safeZones[0].id).toBe("seg-0-sz");
     expect(segments[0].variants[0].id).toBe("seg-0-v");
+  });
+});
+
+describe("turnBoundaries", () => {
+  it("does not end a turn on another voice's backchannel when the speaker goes on", () => {
+    // A: "c'est flop par exemple." — B: "Ouais." — A: "Dalton c'est flop."
+    const words = [
+      word("flop", 0, 0.3, "A"),
+      word("exemple.", 0.3, 0.8, "A"),
+      word("Ouais.", 0.8, 1.0, "B"),
+      word("Dalton", 1.0, 1.4, "A"),
+      word("flop.", 1.4, 1.8, "A"),
+    ];
+    const { canEndAfter, canStartAt } = turnBoundaries(words);
+    expect(canEndAfter[1]).toBe(false);
+    expect(canEndAfter[2]).toBe(false);
+    expect(canStartAt[3]).toBe(false);
+    expect(canEndAfter[4]).toBe(true);
+  });
+
+  it("ends a turn where another voice takes over for real", () => {
+    const words = [
+      word("question", 0, 0.5, "A"),
+      word("?", 0.5, 0.6, "A"),
+      word("Alors", 0.6, 1.0, "B"),
+      word("voilà", 1.0, 1.4, "B"),
+      word("ce", 1.4, 1.6, "B"),
+      word("que", 1.6, 1.8, "B"),
+      word("je", 1.8, 2.0, "B"),
+    ];
+    const { canEndAfter, canStartAt } = turnBoundaries(words);
+    expect(canEndAfter[1]).toBe(true);
+    expect(canStartAt[2]).toBe(true);
+  });
+
+  it("ends a turn on a pause, even in an undiarized transcript", () => {
+    const words = [
+      { text: "Fin.", startSec: 0, endSec: 0.4, confidence: 0.9 },
+      { text: "Suite", startSec: 1.2, endSec: 1.5, confidence: 0.9 },
+      { text: "directe.", startSec: 1.5, endSec: 1.9, confidence: 0.9 },
+    ];
+    const { canEndAfter } = turnBoundaries(words);
+    expect(canEndAfter[0]).toBe(true);
+    expect(canEndAfter[1]).toBe(false);
+  });
+});
+
+describe("segmentTranscript on turns", () => {
+  it("never ends a clip on a sentence its speaker carries on after", () => {
+    // 40 sentences of A, 2 s each, with a backchannel from B after every
+    // fifth one; A only really stops (pause) after sentence 34.
+    const words: TranscriptWord[] = [];
+    let t = 0;
+    for (let s = 0; s < 40; s++) {
+      for (let w = 0; w < 5; w++) {
+        words.push(word(w === 4 ? `phrase${s}.` : `mot${s}x${w}`, t, t + 0.4, "A"));
+        t += 0.4;
+      }
+      if (s % 5 === 4 && s < 39) {
+        words.push(word("Ouais.", t, t + 0.3, "B"));
+        t += 0.3;
+      }
+      if (s === 34) t += 1;
+    }
+    const segments = segmentTranscript(words, build);
+    expect(segments.length).toBeGreaterThan(0);
+    // Every clip ends where nobody picks up straight away (the pause after
+    // sentence 34 and its "ouais"), or at the end of the transcript.
+    for (const segment of segments) {
+      const last = words.indexOf(segment.words[segment.words.length - 1]);
+      const next = words[last + 1];
+      expect(next === undefined || next.startSec - words[last].endSec >= 0.6).toBe(true);
+    }
   });
 });

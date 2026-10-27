@@ -80,19 +80,32 @@ function dedupeAndSort(keyframes: ZoomKeyframe[]): ZoomKeyframe[] {
   return [...byTime.values()].sort((a, b) => a.tSec - b.tSec);
 }
 
+/**
+ * The zoom curve as the first scale plus one ramp per change: each segment
+ * between two keyframes adds its difference, spread linearly over its
+ * span. A segment that holds the scale adds nothing at all — and that is
+ * most of them in a "punch on each speaker change" edit, which nested
+ * if() branches spelled out one by one until the expression, repeated in
+ * the crop's four parameters, passed the filtergraph limit and the whole
+ * animated crop (speaker framing included) fell back to a static one.
+ *
+ * ffmpeg evaluates the crop's width and height once, at configuration,
+ * with `t` undefined (NaN): a ramp would then be NaN and the filter
+ * refused. The expression answers the last keyframe's scale there, which
+ * is what the previous nested form evaluated to at that moment.
+ */
 function buildPiecewiseScaleExpr(points: ZoomKeyframe[]): string {
-  let expr = fmt(points[points.length - 1].scale);
-  for (let i = points.length - 2; i >= 0; i--) {
+  let expr = fmt(points[0].scale);
+  for (let i = 0; i < points.length - 1; i++) {
     const a = points[i];
     const b = points[i + 1];
+    const step = b.scale - a.scale;
+    if (Math.abs(step) <= EPSILON) continue;
     const span = b.tSec - a.tSec;
-    const interp =
-      span > 0
-        ? `(${fmt(a.scale)}+(${fmt(b.scale - a.scale)})*(t-${fmt(a.tSec)})/${fmt(span)})`
-        : fmt(b.scale);
-    expr = `if(lt(t,${fmt(b.tSec)}),${interp},${expr})`;
+    const progress = span > 0 ? `clip((t-${fmt(a.tSec)})/${fmt(span)},0,1)` : `gte(t,${fmt(b.tSec)})`;
+    expr += `${step < 0 ? "-" : "+"}${fmt(Math.abs(step))}*${progress}`;
   }
-  return expr;
+  return `if(isnan(t),${fmt(points[points.length - 1].scale)},${expr})`;
 }
 
 interface ResolvedScale {
@@ -202,6 +215,28 @@ function sanitizeFraming(framing: FramingShot[]): { shots: FramingShot[]; notes:
 function componentExpr(shots: FramingShot[], component: RectComponent, baseValue: number): string {
   if (!shots.some((shot) => Math.abs(shot.rect[component] - baseValue) > EPSILON)) {
     return fmt(baseValue);
+  }
+
+  // Shots that follow each other without a gap — what framing on the
+  // camera cuts of an edited show produces, dozens per clip — compile to a
+  // sum of steps: the first value, plus each change from the moment it
+  // happens, as a jump (a cut) or as a linear ramp over the shot's
+  // transition (a pan). Same function as the nested form below, at a
+  // fraction of the length and without nesting dozens of if() deep.
+  const contiguous = shots.every((shot, i) => i === 0 || Math.abs(shot.startSec - shots[i - 1].endSec) <= EPSILON);
+  if (contiguous) {
+    let expr = fmt(shots[0].rect[component]);
+    for (let i = 1; i < shots.length; i++) {
+      const step = shots[i].rect[component] - shots[i - 1].rect[component];
+      if (Math.abs(step) <= EPSILON) continue;
+      const start = fmtTime(shots[i].startSec);
+      const progress =
+        shots[i].transitionSec > EPSILON ? `clip((t-${start})/${fmt(shots[i].transitionSec)},0,1)` : `gte(t,${start})`;
+      expr += `${step < 0 ? "-" : "+"}${fmt(Math.abs(step))}*${progress}`;
+    }
+    // Same configuration-time guard as the zoom: a pan's ramp is NaN while
+    // `t` is undefined.
+    return shots.some((shot) => shot.transitionSec > EPSILON) ? `if(isnan(t),${fmt(shots[0].rect[component])},${expr})` : expr;
   }
 
   let expr = fmt(baseValue);

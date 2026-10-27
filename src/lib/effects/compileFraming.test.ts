@@ -27,6 +27,35 @@ function shotAt(id: string, startSec: number, endSec: number, x: number, overrid
   };
 }
 
+/**
+ * The crop's x, as a fraction of the width, at time t: the compiled
+ * expression evaluated the way ffmpeg would, for the few functions it
+ * uses. What a shot list must get right is the rectangle in force at each
+ * second, whatever the text of the expression.
+ */
+function cropXAt(filterFragment: string, t: number): number {
+  const x = /:x='in_w\*\((.+)\)':y=/.exec(filterFragment)?.[1];
+  if (!x) throw new Error(`pas d'expression x dans ${filterFragment}`);
+  // ffmpeg's if() is a reserved word in JavaScript: it is renamed for the evaluation.
+  const js = x.replace(/(^|[^a-z_])if\(/g, "$1if_(");
+  const evaluate = new Function("t", "gte", "lt", "clip", "if_", "isnan", `return ${js};`) as (
+    t: number,
+    gte: (a: number, b: number) => number,
+    lt: (a: number, b: number) => number,
+    clip: (v: number, lo: number, hi: number) => number,
+    if_: (c: number, a: number, b: number) => number,
+    isnan: (v: number) => number
+  ) => number;
+  return evaluate(
+    t,
+    (a, b) => (a >= b ? 1 : 0),
+    (a, b) => (a < b ? 1 : 0),
+    (v, lo, hi) => Math.min(hi, Math.max(lo, v)),
+    (c, a, b) => (c ? a : b),
+    (v) => (Number.isNaN(v) ? 1 : 0)
+  );
+}
+
 const LEFT = shotAt("shot-1", 0, 5, 0.05);
 const RIGHT = shotAt("shot-2", 5, 10, 0.39);
 
@@ -47,10 +76,11 @@ describe("compileZoomFilter — cadrage par plans", () => {
 
     expect(result.framingApplied).toBe(2);
     expect(result.notes.filter((n) => /ignoré/.test(n))).toHaveLength(0);
-    // The switch happens at the first shot's end, and both rectangles are in there.
-    expect(result.filterFragment).toContain("lt(t,5.000)");
-    expect(result.filterFragment).toContain("0.050000");
-    expect(result.filterFragment).toContain("0.390000");
+    // The switch happens exactly at the second shot's start.
+    expect(cropXAt(result.filterFragment, 0)).toBeCloseTo(0.05, 6);
+    expect(cropXAt(result.filterFragment, 4.99)).toBeCloseTo(0.05, 6);
+    expect(cropXAt(result.filterFragment, 5)).toBeCloseTo(0.39, 6);
+    expect(cropXAt(result.filterFragment, 9.99)).toBeCloseTo(0.39, 6);
   });
 
   it("garde une largeur et une hauteur constantes quand les plans ne changent que de place", () => {
@@ -60,15 +90,15 @@ describe("compileZoomFilter — cadrage par plans", () => {
       framing: [LEFT, RIGHT],
     });
 
-    // Only x should carry a branch: a condition inside w or h would mean
-    // the crop window itself changes shape mid-clip, which is a bug, not
-    // a reframe — and it doubles the expression for nothing.
+    // Only x should carry a switch: one inside w or h would mean the crop
+    // window itself changes shape mid-clip, which is a bug, not a reframe
+    // — and it doubles the expression for nothing.
     const width = /w='([^']+)'/.exec(result.filterFragment)?.[1] ?? "";
     const height = /h='([^']+)'/.exec(result.filterFragment)?.[1] ?? "";
     const x = /x='([^']+)'/.exec(result.filterFragment)?.[1] ?? "";
-    expect(width).not.toContain("if(");
-    expect(height).not.toContain("if(");
-    expect(x).toContain("if(");
+    expect(width).not.toContain("gte(");
+    expect(height).not.toContain("gte(");
+    expect(x).toContain("gte(");
   });
 
   it("n'encadre pas le premier plan d'une borne basse ni le dernier d'une borne haute", () => {
@@ -92,9 +122,11 @@ describe("compileZoomFilter — cadrage par plans", () => {
       framing: [LEFT, shotAt("shot-2", 5, 10, 0.39, { transitionSec: 0.5 })],
     });
 
-    // A pan is an expression of t inside the shot's first half-second.
-    expect(result.filterFragment).toContain("lt(t,5.500)");
-    expect(result.filterFragment).toContain("(t-5.000)");
+    // A pan is a straight line over the shot's first half-second.
+    expect(cropXAt(result.filterFragment, 5)).toBeCloseTo(0.05, 6);
+    expect(cropXAt(result.filterFragment, 5.25)).toBeCloseTo(0.22, 6);
+    expect(cropXAt(result.filterFragment, 5.5)).toBeCloseTo(0.39, 6);
+    expect(cropXAt(result.filterFragment, 8)).toBeCloseTo(0.39, 6);
   });
 
   it("coupe franchement quand la transition vaut 0", () => {
@@ -179,6 +211,34 @@ describe("compileZoomFilter — cadrage par plans", () => {
 
     expect(result.framingApplied).toBe(0);
     expect(result.notes.some((n) => /maximum/.test(n))).toBe(true);
+  });
+
+  it("garde le même résultat sous la forme imbriquée quand les plans laissent un trou", () => {
+    // Not contiguous: the compact sum of steps cannot express the gap, the
+    // nested form falls back to the base crop between the two shots.
+    const result = compileZoomFilter({
+      baseCrop: VERTICAL_CROP,
+      zoomKeyframes: [{ tSec: 0, scale: 1 }],
+      framing: [shotAt("shot-1", 0, 4, 0.05), shotAt("shot-2", 6, 10, 0.39)],
+    });
+    expect(cropXAt(result.filterFragment, 1)).toBeCloseTo(0.05, 6);
+    expect(cropXAt(result.filterFragment, 5)).toBeCloseTo(0.2188, 6);
+    expect(cropXAt(result.filterFragment, 7)).toBeCloseTo(0.39, 6);
+  });
+
+  it("garde le cadrage d'un vrai clip monté : 40 plans sous un zoom « punch » à chaque changement de voix", () => {
+    // What an edited show produced: a punch-in held at 1.2 between speaker
+    // changes (many flat keyframes), and a shot per camera cut. Spelled
+    // out branch by branch, the zoom alone pushed the crop past the
+    // filtergraph limit and the whole animated crop fell back to static.
+    const zoomKeyframes = [{ tSec: 0, scale: 1 }];
+    for (let t = 0.35; t < 60; t += 1.5) zoomKeyframes.push({ tSec: Number(t.toFixed(3)), scale: 1.2 });
+    zoomKeyframes.push({ tSec: 60, scale: 1 });
+    const shots = Array.from({ length: 40 }, (_, i) => shotAt(`shot-${i + 1}`, i * 1.5, (i + 1) * 1.5, i % 2 === 0 ? 0.05 : 0.4));
+    const result = compileZoomFilter({ baseCrop: VERTICAL_CROP, zoomKeyframes, framing: shots });
+
+    expect(result.framingApplied).toBe(40);
+    expect(validateFilterGraph(`${result.filterFragment},scale=1080:1920`)).toEqual({ ok: true, errors: [] });
   });
 
   it("produit un filtergraph accepté par la validation indépendante dans le pire cas réaliste", () => {

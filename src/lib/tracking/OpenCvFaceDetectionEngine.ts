@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import type { DetectedBoundingBox, SubjectDetectionEngine, SubjectDetectionInput } from "./types";
+import type { DetectedBoundingBox, SceneDetection, SubjectDetectionEngine, SubjectDetectionInput } from "./types";
 
 /**
  * Real, optional face-detection engine backed by a local Python + OpenCV
@@ -96,6 +96,15 @@ function isFiniteNumber(v: unknown): v is number {
  * is rejected as an invalid-output error.
  */
 export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
+  return parseOpenCvSceneOutput(stdout).detections;
+}
+
+/**
+ * The detections and the camera cuts. `cuts` is optional — a script from
+ * before it existed reports none, which only means the framing cannot
+ * align on the editing.
+ */
+export function parseOpenCvSceneOutput(stdout: string): SceneDetection {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -124,7 +133,12 @@ export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
     throw new OpenCvEngineInvalidOutputError("le champ detections doit être un tableau.");
   }
 
-  return body.detections.map((raw, index) => {
+  if (body.cuts !== undefined && (!Array.isArray(body.cuts) || !body.cuts.every((t) => isFiniteNumber(t) && t >= 0))) {
+    throw new OpenCvEngineInvalidOutputError("cuts doit être un tableau de secondes positives.");
+  }
+  const cuts = Array.isArray(body.cuts) ? (body.cuts as number[]) : [];
+
+  const detections = body.detections.map((raw, index): DetectedBoundingBox => {
     if (typeof raw !== "object" || raw === null) {
       throw new OpenCvEngineInvalidOutputError(`detections[${index}] doit être un objet.`);
     }
@@ -151,8 +165,8 @@ export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
     // track_id and activity arrived with active-speaker framing. They stay
     // optional on purpose: an older script, or a user's own engine behind
     // PEAKCUT_TRACKER_COMMAND, produces detections without them and must
-    // keep working — it simply cannot drive a framing that follows the
-    // speaker, and says so (see assignSpeakersToFaces).
+    // keep working — without activity, a wide shot with several people
+    // cannot tell who talks, and keeps its framing (see buildFaceFraming).
     if (d.track_id !== undefined && (typeof d.track_id !== "string" || d.track_id.length === 0)) {
       throw new OpenCvEngineInvalidOutputError(`detections[${index}].track_id doit être une chaîne non vide.`);
     }
@@ -171,6 +185,7 @@ export function parseOpenCvOutput(stdout: string): DetectedBoundingBox[] {
       ...(isFiniteNumber(d.activity) ? { activity: d.activity } : {}),
     };
   });
+  return { detections, cuts };
 }
 
 interface ProcessResult {
@@ -243,6 +258,10 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
   }
 
   async detect(input: SubjectDetectionInput): Promise<DetectedBoundingBox[]> {
+    return (await this.detectScene(input)).detections;
+  }
+
+  async detectScene(input: SubjectDetectionInput): Promise<SceneDetection> {
     const { stdout, stderr, code, timedOut } = await runProcess(
       this.pythonBinary,
       [this.scriptPath, input.mediaPath, String(this.sampleFps), String(this.activityFps)],
@@ -254,7 +273,7 @@ export class OpenCvFaceDetectionEngine implements SubjectDetectionEngine {
     }
 
     try {
-      return parseOpenCvOutput(stdout);
+      return parseOpenCvSceneOutput(stdout);
     } catch (err) {
       if (err instanceof OpenCvEngineInvalidOutputError && code !== 0) {
         throw new OpenCvEngineExecutionError(stderr || `code de sortie ${code}`);

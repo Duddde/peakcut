@@ -10,7 +10,8 @@ PeakCut est un MVP de repurposing vidéo orienté Shorts. Il transforme un proje
 - Transcript mot-à-mot horodaté et locuteur, via un fournisseur mock déterministe hors-ligne.
 - Adaptateurs préparés pour OpenAI `gpt-4o-transcribe-diarize` et AssemblyAI ; ils échouent explicitement sans configuration et n’appellent aucun service par défaut.
 - Score éditorial explicable : accroche, densité lexicale, question, émotion, changement de locuteur, durée, confiance et pénalités.
-- Traitement automatique en un bouton : une URL YouTube enchaîne téléchargement, transcription, découpage, classement et cadrage, étape par étape et reprenable.
+- Traitement automatique sans clic : coller une URL YouTube (dans la liste des projets ou dans le studio) enchaîne téléchargement, transcription, découpage, classement et cadrage, étape par étape et reprenable.
+- Aperçu automatique : le clip sélectionné est rendu en basse résolution, tel que l’export le montera, dès qu’il est sélectionné et après chaque retouche — sans lancer de rendu ni enregistrer.
 - Découpage en clips candidats : le transcript est coupé en clips d’une minute (50–95 s) alignés sur des fins de phrase, classés par ce même score.
 - Montage par clip, modifiable : zoom animé et style de sous-titres compilés réellement par l’export, et éditables dans le studio.
 - Timeline éditable : clips placés à leur vraie position, rognage à la souris ou au clavier, découpe et suppression — avec re-découpage des sous-titres, re-score et réajustement des effets.
@@ -162,10 +163,26 @@ L'endpoint OpenAI refuse tout fichier au-delà de 25 Mio, ce qu'une vidéo de
 quelques minutes en 1080p dépasse largement. Au-dessus de cette taille, PeakCut
 extrait d'abord la piste audio avec FFmpeg (mono, 16 kHz, 64 kbit/s, soit
 environ 8 ko par seconde) et envoie ce fichier-là ; en dessous, le fichier
-d'origine part tel quel, sans ré-encodage et sans dépendre de FFmpeg. Si l'audio
-extrait dépasse encore la limite — environ 50 minutes d'enregistrement — la
-transcription échoue explicitement plutôt que d'envoyer un fichier tronqué et de
-rendre un transcript qui s'arrête en route.
+d'origine part tel quel, sans ré-encodage et sans dépendre de FFmpeg.
+
+Le modèle `gpt-4o-transcribe-diarize` refuse en plus tout audio de plus de
+**1400 s** (23 min 20), quelle que soit sa taille. Au-delà, PeakCut découpe la
+piste audio (`src/lib/ffmpeg/splitAudioForTranscription.ts`) :
+
+- en morceaux de 1320 s au plus, une marge sous la limite, parce que la durée
+  mesurée par l'API sur un MP3 peut différer de quelques trames de celle de
+  ffprobe ;
+- **dans un silence** (`silencedetect`, 0,4 s sous -35 dB) quand il y en a un
+  dans le dernier quart du morceau, sinon pile à la limite, pour ne pas couper
+  un mot en deux ;
+- transcrits par 3 en parallèle, puis remis bout à bout sur l'horloge de la
+  vidéo (`mergeChunkTranscripts`). Si un seul morceau échoue, toute la
+  transcription échoue : un transcript troué serait découpé en clips comme si
+  rien n'avait été dit à cet endroit.
+
+Le modèle étiquette les voix de chaque requête indépendamment : rien ne dit que
+le « A » du deuxième morceau est le « A » du premier. Les étiquettes sont donc
+suffixées par morceau (`A·1`, `A·2`) plutôt que fusionnées à l'aveugle.
 
 `PEAKCUT_TRANSCRIPT_TIMEOUT_MS` borne la requête au fournisseur (10 minutes par
 défaut, ce qui couvre l'upload et le traitement d'un média long).
@@ -176,10 +193,16 @@ L’analyse ne note plus la vidéo entière comme un bloc unique : elle propose
 plusieurs clips candidats, découpés depuis le transcript par
 `src/lib/analysis/segmentTranscript.ts`. Trois règles les façonnent :
 
-1. **Les bornes tombent sur des fins de phrase**, jamais au milieu d’une
-   proposition — un clip qui s’ouvre en plein milieu d’une phrase est
-   inutilisable quel que soit son score, donc ces fenêtres ne sont même pas
-   construites.
+1. **Les bornes tombent sur des fins de tour de parole**, pas seulement sur
+   des fins de phrase. Un clip qui s’ouvre ou se ferme au milieu d’une phrase
+   est inutilisable quel que soit son score, et ces fenêtres ne sont même pas
+   construites. Mais une fin de phrase ne suffit pas : dans « c’est flop par
+   exemple. » — « Ouais. » — « Dalton c’est flop », la personne n’a pas fini.
+   `turnBoundaries` n’accepte une borne que s’il y a une pause d’au moins
+   0,6 s, ou un vrai changement de voix. Une interjection de 3 mots ou moins,
+   en moins de 1,5 s, entre deux passages de la même personne n’en est pas un.
+   Si un transcript n’offre aucune borne de ce genre (ni pauses, ni voix), les
+   fins de phrase reprennent le relais.
 2. **Les durées visent la minute** (plateau 50–95 s, défini une seule fois
    dans `src/lib/domain/shortFormDuration.ts`), exactement l’intervalle où le
    facteur de durée du scorer vaut 1. Le générateur et le scorer s’accordent
@@ -191,6 +214,18 @@ plusieurs clips candidats, découpés depuis le transcript par
 3. **Les candidats retenus ne se chevauchent pas** : sinon un moment fort
    remplirait toute la liste de quasi-doublons de lui-même et enterrerait
    tout le reste de la vidéo.
+
+Les bornes des clips ainsi découpés sont ensuite **posées sur l’audio**
+(`snapClipToAudio`). Les horaires des mots sont estimés à l’intérieur de chaque
+phrase renvoyée par le modèle, et une coupe posée dessus mange régulièrement la
+dernière syllabe. Autour de chaque borne, la coupe va donc au moment le plus
+calme de l’audio : jusqu’à 0,8 s après la fin estimée, 0,15 s avant, et pour
+le début, seulement en arrière, dans la pause qui précède le premier mot. Cela
+se fait sur le niveau **relatif** (`audioEnvelope`), pas sur un seuil de
+silence : une émission avec une ambiance sous les voix n’atteint jamais le
+silence, mais le creux entre deux mots se voit toujours. Le plan d’effets est
+dessiné ensuite, pour les bornes finales. Les clips déjà retouchés à la main ne
+sont jamais déplacés.
 
 C’est un **sélecteur, pas un modèle** : il indique où un monteur humain doit
 regarder en premier, il ne décide de rien. Chaque candidat porte la même
@@ -207,8 +242,21 @@ en place.
 
 ## D’une URL aux clips : le traitement automatique
 
-Bouton **« Tout lancer »** dans le studio : coller une URL YouTube suffit, le
-reste s’enchaîne jusqu’aux clips cadrés et sous-titrés.
+Coller une URL YouTube suffit, le reste s’enchaîne jusqu’aux clips cadrés et
+sous-titrés, puis à l’aperçu du meilleur clip :
+
+- dans **la liste des projets**, le champ « Collez un lien YouTube » crée le
+  projet et ouvre le studio, qui lance aussitôt le traitement ;
+- dans **le studio**, coller un lien valide dans « Source YouTube » le lance
+  sans bouton à presser (Entrée ou « Lancer » restent possibles pour un lien
+  tapé) ;
+- **« Tout lancer »** relance la chaîne sur la source déjà présente.
+
+Le collage passe par `/api/download-youtube` avec
+`pipeline: { providerId, trackProvider }`, le même enchaînement que
+`/api/jobs`, et il re-découpe le projet depuis le nouveau transcript. Sans
+fournisseur de transcription configuré, il n’y a rien à enchaîner : le lien
+télécharge seulement la vidéo, et le panneau le dit.
 
 Ce n’est pas un job géant, c’est la file existante enchaînée
 (`src/lib/jobs/chain.ts`) : `download → transcription → analysis → tracking`.
@@ -233,6 +281,66 @@ Le rendu (`render`) ne fait **pas** partie de la chaîne : exporter chaque
 candidat coûterait des minutes de FFmpeg sur des coupes que le monteur n’a pas
 encore regardées — et l’intérêt de l’éditeur est justement qu’il les change
 d’abord.
+
+## Aperçu : voir le clip sans lancer de rendu
+
+Sur un projet de compte qui a son média, le studio affiche sous la timeline
+l’**aperçu du clip sélectionné** : `/api/preview-segment` le rend avec le même
+cadrage, zoom, effets 3D, illustrations et sous-titres que l’export, en
+540×960 avec filigrane. Il se régénère seul 1,2 s après la dernière retouche.
+
+- **Le clip entier**, jusqu’à 120 s (`ACCOUNT_PREVIEW_MAX_DURATION_SEC`) ;
+  l’essai public garde ses 15 premières secondes et son bouton, car ses
+  aperçus sont comptés.
+- **Sans enregistrer** : la requête porte le segment tel qu’il est dans le
+  studio (`segment`). Il ne remplace que *ce qui* est rendu : le média vient
+  toujours de la source du projet, et les illustrations des assets du projet.
+- **Une vidéo téléchargée n’est plus refusée pour sa taille** : la limite de
+  100 Mo ne vise que les chemins d’upload fournis par l’appelant, l’aperçu ne
+  faisant que chercher une fenêtre dans le fichier du projet.
+
+Le rendu final (1080×1920, sans filigrane) reste le bouton « Lancer le
+rendu ».
+
+## Claude Motion : des cartes animées qui illustrent le propos
+
+Claude lit ce qui est dit dans chaque clip et conçoit des **cartes animées**,
+calées sur le moment où l'idée est dite :
+
+- **idée clé** : quelques mots ;
+- **chiffre** : la valeur en grand, et ce qu'elle mesure ;
+- **liste** : les points arrivent un par un ;
+- **citation** : la phrase forte, et qui la dit.
+
+Les cartes sont des données du plan de montage (`renderPlan.motion`), pas un
+rendu à part. `compileMotionAss` les dessine comme événements animés (`\t`,
+`\move`, `\fad`) de la piste de sous-titres que l'export et l'aperçu
+incrustent déjà. Il n'y a donc ni moteur de rendu en plus, ni entrée ffmpeg en
+plus, et l'aperçu montre exactement ce que contiendra le fichier. Les cartes
+se placent en haut ou au milieu du cadre, jamais en bas où sont les
+sous-titres, avec la couleur des sous-titres comme accent.
+
+- **Appel** : `ClaudeMotionDesigner`, modèle `claude-opus-5-5`, sortie
+  structurée validée par un schéma `zod`. Le repli serveur est activé
+  (`fallbacks: "default"`) : une demande déclinée par un garde-fou est rejouée
+  sur un autre modèle dans le même appel. Un refus final ou une réponse
+  tronquée sont signalés, jamais remplacés par des cartes vides.
+- **Rien n'est pris tel quel** : `sanitizeMotionCards` ramène chaque carte dans
+  les bornes que l'export revérifie (12 cartes au plus, 0,8 à 8 s chacune,
+  longueurs de texte, une seule carte à la fois). Une carte refusée ferait
+  refuser tout le plan, cadrage et zoom compris.
+- **Automatique** : quand Claude est configuré, le traitement automatique se
+  termine par l'étape « Motion design (Claude) » (job `motion`). Sinon cette
+  étape n'est pas ajoutée, plutôt que d'échouer après que les clips sont prêts.
+- **Studio** : le panneau « Claude Motion » régénère les cartes du clip
+  sélectionné, et chaque carte se modifie (texte, détail, points, type,
+  position, minutage) ou se supprime. L'aperçu suit.
+- **Essai public** : jamais, l'essai ne dépense pas le compte Anthropic de
+  l'exploitant.
+
+Configuration : `ANTHROPIC_API_KEY` dans `.env.local` (ou
+`ANTHROPIC_AUTH_TOKEN`), puis redémarrer le serveur. Sans clé, le panneau le
+dit, et rien n'est appelé.
 
 ## Effets : un montage par clip, modifiable
 
@@ -303,62 +411,66 @@ génération se déclare indisponible.
 
 ## Cadrage : le cadre suit celui qui parle
 
-Un cadre fixe convient à une personne et trahit un dialogue : sur un échange,
-le 9:16 doit être sur celui qui parle. Le plan de rendu d’un clip porte donc
-une liste de **plans de cadrage** (`renderPlan.framing`) — un rectangle de la
-source, de telle seconde à telle seconde — que l’export et l’aperçu compilent
-dans le même filtre `crop` que le zoom.
+Le plan de rendu d’un clip porte une liste de **plans de cadrage**
+(`renderPlan.framing`) : un rectangle de la source, de telle seconde à telle
+seconde. L’export et l’aperçu les compilent dans le même filtre `crop` que le
+zoom. Ces plans sont calculés par `lib/tracking/buildFaceFraming.ts`, **plan de
+caméra par plan de caméra**.
 
-La méthode croise deux mesures réelles, et rien d’autre :
+Une émission montée change d’angle toutes les une à deux secondes. La même
+personne est à gauche d’un plan et à droite du suivant, et la diarisation
+étiquette souvent une seule personne sous plusieurs voix. Associer une voix à
+un visage pour toute la vidéo ne peut donc pas marcher : la décision se prend
+moment par moment.
 
-- **Qui parle quand** vient de la diarisation du transcript (AssemblyAI avec
-  `speaker_labels`). Un mot que le fournisseur n’a pas étiqueté ne prolonge
-  pas la prise de parole précédente : son incertitude ne doit pas devenir un
-  cadrage sur le mauvais visage.
-- **Quelle bouche bouge** vient de la détection locale. `track_faces.py`
-  décode désormais à 10 images/seconde tout en ne lançant la cascade de Haar
-  qu’une fois par seconde : le coût de détection est inchangé, et les images
-  intermédiaires servent à différencier la région de la bouche de chaque
-  visage suivi. Le mouvement global de l’image est soustrait, sinon un
-  mouvement de caméra ferait « parler » tout le monde à la fois.
+- **Les coupes de caméra** sont détectées par `track_faces.py` pendant le
+  décodage à 10 images/s qu’il fait déjà : une coupe est un pic de différence
+  entre deux images, d’au moins 0,08, et 2,5 fois plus fort que ses deux
+  voisines. Un geste ou un mouvement de caméra atteint la même amplitude, mais
+  sur plusieurs images. L’histogramme ne sert à rien ici : sur un plateau
+  sombre éclairé partout pareil, deux angles ont le même. À chaque coupe, les
+  suivis de visages repartent de zéro et la détection tourne tout de suite sur
+  le nouveau plan.
+- **Les visages** sont cherchés de face, puis de profil (dans les deux sens,
+  par miroir), parce qu’un gros plan d’interview montre souvent la personne de
+  côté.
+- **Dans chaque plan de caméra :**
+  - un seul visage (gros plan) : le cadre est dessus ;
+  - plusieurs visages (plan large) : le cadre va sur celui dont la bouche
+    bouge le plus pendant chaque prise de parole. La comparaison se fait entre
+    visages **au même moment**, sous la même lumière. Sans écart net (30 %), le
+    cadre reste où il était, ou va sur le visage le plus présent ;
+  - aucun visage : le cadre garde le précédent.
+  Les visages nettement plus petits que le principal (arrière-plan, fausses
+  détections) sont ignorés.
 
-Le visage de chaque voix est celui qui a bougé pendant ses prises de parole
-(`assignSpeakersToFaces`). Ce qui compte autant que la réponse, c’est ce que
-cette association **refuse** de trancher : un seul visage, une seule voix, un
-moteur qui ne mesure pas l’activité labiale, ou deux visages qui bougent
-autant à 30 % près. Dans tous ces cas la réponse est « inconnu », le cadrage
-reste celui du clip, et le job de suivi dit précisément pourquoi. Une mauvaise
-association serait pire que pas d’association : elle cadrerait chaque clip sur
-la personne qui écoute.
+Le cadre change **sur les coupes de caméra**, où un recadrage est invisible,
+et entre deux personnes d’un même plan large, au milieu du silence qui les
+sépare. Ce sont toujours des coupes franches, jamais des panoramiques. Les
+morceaux de plan trop courts sont donnés à leur voisin : un passage de moins de
+1,2 s entre deux personnes, et toute bribe de moins de 0,4 s, que la validation
+du plan refuserait. Un plan refusé n’est pas appliqué du tout.
 
-Le reste est éditorial, et c’est volontaire. Une interjection de deux mots est
-absorbée par le plan voisin plutôt que de devenir une coupe d’un quart de
-seconde ; une coupe entre deux intervenants tombe **au milieu du silence**,
-là où un monteur la place ; et le clip est couvert de bout en bout, pour que
-le cadre ne retombe jamais sur un cadrage par défaut en milieu de phrase. Un
-changement de locuteur est une **coupe franche** : faire glisser le cadre d’un
-visage à l’autre attire l’œil sur le recadrage au lieu de la personne qui
-parle.
+**Bornes.** Un clip monté demande 20 à 40 plans. Le plafond est donc à 120, et
+l’expression `crop` est écrite comme une somme de marches (une coupe) ou de
+rampes (un panoramique, ou une variation du zoom), au lieu de `if()` imbriqués.
+Les tronçons où rien ne change ne coûtent rien. Sous l’ancienne forme, le zoom
+« punch » répété dans les quatre paramètres du `crop` dépassait à lui seul les
+8000 caractères du filtergraph, et tout le recadrage animé retombait en
+silence sur un cadre fixe. ffmpeg évalue largeur et hauteur une fois, à la
+configuration, avec `t` indéfini : l’expression y répond une valeur finie
+(`if(isnan(t),…)`).
 
 Le panneau « Cadrage du clip » du studio rend tout cela modifiable : déplacer
-une coupe, envoyer un plan sur l’autre intervenant, transformer une coupe en
-panoramique, supprimer un plan ou revenir à un cadre fixe. Les contrôles
-passent tous par `lib/effects/framingEdits`, qui garde les plans jointifs et
-dans les bornes que le serveur revérifie — l’interface ne peut donc pas
-proposer un cadrage que l’export refuserait.
+une coupe, changer un plan de cible, transformer une coupe en panoramique,
+supprimer un plan ou revenir à un cadre fixe. Les contrôles passent par
+`lib/effects/framingEdits`, qui garde les plans jointifs et dans les bornes
+que le serveur revérifie.
 
-Deux bornes ont une raison concrète. Le nombre de plans est plafonné (16) parce
-que chaque plan ajoute une branche à l’expression `crop` sur x, y, w et h, et
-que la validation indépendante du filtergraph refuse au-delà de 8000
-caractères : un plan au-delà du plafond compilerait en un filtre que personne
-n’accepte, et retomberait en silence sur un cadrage statique. Et la fenêtre de
-cadrage garde la même taille d’un plan à l’autre : un plan est un autre
-centre, jamais une autre fenêtre — ce qui garde aussi l’expression courte.
-
-Il faut donc, pour qu’un clip suive le locuteur : un transcript diarisé, le
-détecteur local installé (voir plus haut), et au moins deux visages distincts
-dans la source. À défaut, le cadrage reste celui qui suit le visage détecté —
-ce qui est le bon résultat quand une seule personne parle.
+Il faut, pour qu’un clip suive les visages, le détecteur local installé (voir
+plus haut). Le transcript sert seulement à savoir **quand** quelqu’un parle :
+sans lui, un clip où chaque plan de caméra ne montre qu’un visage est quand
+même cadré dessus.
 
 ## Effets 3D : la caméra tourne autour du clip
 
@@ -436,6 +548,17 @@ dit à l’utilisateur plutôt que de le laisser croire.
 
 ## Timeline : rogner, couper, supprimer
 
+Sous la timeline du projet, le panneau **« Cuts du clip »** montre les deux
+bords du clip sélectionné, chacun sur 10 secondes. Les mots y sont à leur
+place, colorés par voix, sur l’onde audio de la source
+(`GET /api/projects/[id]/waveform`, une fenêtre de 300 s au plus). Les pauses
+y sont des creux visibles. La ligne se glisse et s’aimante au mot le plus
+proche, un début sur un début de mot et une fin sur une fin (Alt pour la
+placer librement). Les flèches avancent mot par mot, Maj + flèches de 0,1 s.
+L’aperçu du clip se régénère tout seul. Sur une vidéo d’une demi-heure, un
+pixel de la timeline vaut deux secondes : c’est là qu’on place un cut entre
+deux mots.
+
 Les clips sont posés sur l’axe temporel de la source — à leur vraie place, donc
 les passages que personne n’a gardés se voient. Les bords se glissent à la
 souris, ou se déplacent aux flèches ← → une fois la poignée sélectionnée (le
@@ -475,6 +598,13 @@ La signature est du texte libre conservé tel quel dans
 `workflow.rights.confirmedBy` — jamais un jeton d’authentification. Elle
 accompagne l’horodatage de la confirmation, pour que le projet garde la trace
 de qui a attesté quoi, et quand.
+
+**En développement (`next dev`), cette porte est levée** :
+`isRightsConfirmationRequired()` (`src/lib/workflow/rightsConfirmation.ts`)
+répond non quand `NODE_ENV=development`. Le studio n’affiche alors plus
+l’attestation et le job `render` ne la vérifie plus. Partout ailleurs
+(production, suite de tests, worker lancé par `npm run worker`) elle reste
+exigée, sans variable à oublier.
 
 Obtenir le fichier source n’autorise donc rien par soi-même : une vidéo
 YouTube téléchargée franchit `hasLocalMediaFile` comme n’importe quel import

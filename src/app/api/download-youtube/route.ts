@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { isClaudeMotionConfigured } from "@/lib/motion/ClaudeMotionDesigner";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
 import { getRequestActorAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
@@ -11,6 +12,8 @@ import {
 } from "@/lib/publicTrial/quotas";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { SqliteJobRepository } from "@/lib/jobs/JobRepository";
+import { attachChain, buildAutoPipelineChain, ChainConfigurationError, type ChainStep } from "@/lib/jobs/chain";
+import { JobInputParseError, parsePipeline } from "@/lib/jobs/parseJobInput";
 import { redactJobForResponse } from "@/lib/jobs/redactJob";
 import { createFixedWindowRateLimiter, type RateLimiter } from "@/lib/ratelimit/fixedWindowRateLimiter";
 import { validateYoutubeUrl } from "@/lib/youtube/validateYoutubeUrl";
@@ -39,6 +42,12 @@ import { validateYoutubeUrl } from "@/lib/youtube/validateYoutubeUrl";
  * jobs/handlers). A video YouTube refuses to serve (bot check, sign-in,
  * DRM, members-only…) fails the job with that reason — nothing here or in
  * the worker tries to get around it.
+ *
+ * An account may add `pipeline` (same options as /api/jobs) so that the
+ * download is followed by transcription, analysis and framing: pasting a
+ * link is then the only thing the user has to do. The chain is built here,
+ * on the server, and refused to a trial for the same reason /api/jobs
+ * refuses it — chained steps skip the per-kind trial quota.
  */
 
 export interface DownloadYoutubeRouteOptions {
@@ -84,11 +93,12 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
     if (typeof body !== "object" || body === null) {
       return NextResponse.json({ ok: false, error: "Le corps de la requête doit être un objet." }, { status: 400 });
     }
-    const { url, projectId, idempotencyKey, rightsConfirmed } = body as {
+    const { url, projectId, idempotencyKey, rightsConfirmed, pipeline } = body as {
       url?: unknown;
       projectId?: unknown;
       idempotencyKey?: unknown;
       rightsConfirmed?: unknown;
+      pipeline?: unknown;
     };
 
     if (typeof url !== "string") {
@@ -145,6 +155,34 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
       }
     }
 
+    let chain: ChainStep[] = [];
+    try {
+      const pipelineOptions = parsePipeline(pipeline);
+      if (pipelineOptions && actor.kind === "trial") {
+        return NextResponse.json(
+          { ok: false, error: "L'enchaînement automatique n'est pas disponible pendant l'essai public." },
+          { status: 403 }
+        );
+      }
+      if (pipelineOptions) {
+        // A new source makes the previous cut meaningless: re-cut from its transcript.
+        chain = buildAutoPipelineChain("download", {
+          resegment: true,
+          ...pipelineOptions,
+          // Whether Claude Motion closes the chain is the server's call.
+          motion: isClaudeMotionConfigured(),
+        });
+      }
+    } catch (err) {
+      if (err instanceof JobInputParseError) {
+        return NextResponse.json({ ok: false, error: err.message }, { status: 400 });
+      }
+      if (err instanceof ChainConfigurationError) {
+        return NextResponse.json({ ok: false, error: err.message }, { status: 422 });
+      }
+      throw err;
+    }
+
     const jobRepo = new SqliteJobRepository(deps.db);
     const { job, created } = jobRepo.createJob({
       id: randomUUID(),
@@ -153,7 +191,7 @@ export function createDownloadYoutubeHandler(options: DownloadYoutubeRouteOption
       // The *normalized* URL is what gets persisted and downloaded, so a
       // tracking/playlist parameter riding along on the submitted link is
       // dropped here rather than handed to yt-dlp.
-      payload: { url: validation.normalizedUrl, videoId: validation.videoId },
+      payload: attachChain({ url: validation.normalizedUrl, videoId: validation.videoId }, chain),
       idempotencyKey: normalizedKey,
       now: new Date().toISOString(),
     });

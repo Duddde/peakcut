@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { isClaudeMotionConfigured } from "@/lib/motion/ClaudeMotionDesigner";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
 import { getRequestActorAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
@@ -104,7 +105,8 @@ export function createJobsCreateHandler(
     let chain: ChainStep[] = [];
     if (input.pipeline) {
       try {
-        chain = buildAutoPipelineChain(input.kind, input.pipeline);
+        // Whether Claude Motion closes the chain is the server's call.
+        chain = buildAutoPipelineChain(input.kind, { ...input.pipeline, motion: isClaudeMotionConfigured() });
       } catch (err) {
         if (err instanceof ChainConfigurationError) {
           return NextResponse.json({ ok: false, error: err.message }, { status: 422 });

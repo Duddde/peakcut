@@ -6,6 +6,7 @@ import { exportSegment } from "@/lib/ffmpeg/exportSegment";
 import { verifyExport } from "@/lib/ffmpeg/verifyExport";
 import { parseExportRequestBody, ExportRequestParseError } from "@/lib/ffmpeg/parseExportRequest";
 import { getExportBlockReasons } from "@/lib/workflow/exportGate";
+import { isRightsConfirmationRequired } from "@/lib/workflow/rightsConfirmation";
 import type { AppDeps } from "@/lib/appDeps";
 import { resolveRouteDeps } from "@/lib/resolveRouteDeps";
 import { getAuthenticatedUserFromRequestAsync } from "@/lib/auth/getAuthenticatedUserFromRequestAsync";
@@ -92,6 +93,7 @@ export function createExportSegmentHandler(
       hasLocalMediaFile: true,
       segmentEndSec: body.endSec,
       sourceDurationSec: probedSource.durationSec,
+      rightsConfirmationRequired: isRightsConfirmationRequired(),
     });
     if (blockReasons.length > 0) {
       return NextResponse.json({ ok: false, error: "Export refusé.", reasons: blockReasons }, { status: 403 });

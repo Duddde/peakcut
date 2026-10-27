@@ -187,6 +187,44 @@ describe("POST /api/download-youtube", () => {
     expect(res.status).toBe(409);
   });
 
+  it("chains the whole automatic pipeline after the download when asked to", async () => {
+    const deps = createTestAppDeps();
+    const { cookie } = makeAuthedUserAndCookie(deps, "alice@example.com");
+    const projectId = await createProjectFor(deps, cookie);
+
+    const POST = createDownloadYoutubeHandler({ deps, rateLimiter: permissiveLimiter() });
+    const res = await POST(
+      postRequest({ url: VALID_URL, projectId, pipeline: { providerId: "openai", trackProvider: "local-subject" } }, cookie)
+    );
+
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    const stored = new SqliteJobRepository(deps.db).getJobById(json.job.id);
+    expect(stored?.payload).toEqual({
+      url: VALID_URL,
+      videoId: "dQw4w9WgXcQ",
+      __chain: [
+        { kind: "transcription", payload: { providerId: "openai" } },
+        // A new source re-cuts the project from its own transcript.
+        { kind: "analysis", payload: { resegment: true } },
+        { kind: "tracking", payload: { provider: "local-subject" } },
+      ],
+    });
+  });
+
+  it("refuses a pipeline it cannot build instead of queueing a bare download", async () => {
+    const deps = createTestAppDeps();
+    const { cookie } = makeAuthedUserAndCookie(deps, "alice@example.com");
+    const projectId = await createProjectFor(deps, cookie);
+    const POST = createDownloadYoutubeHandler({ deps, rateLimiter: permissiveLimiter() });
+
+    const noProvider = await POST(postRequest({ url: VALID_URL, projectId, pipeline: true }, cookie));
+    expect(noProvider.status).toBe(422);
+    const malformed = await POST(postRequest({ url: VALID_URL, projectId, pipeline: "yes" }, cookie));
+    expect(malformed.status).toBe(400);
+    expect(new SqliteJobRepository(deps.db).listJobsByProject(projectId)).toHaveLength(0);
+  });
+
   it("rate-limits a caller who floods the endpoint", async () => {
     const deps = createTestAppDeps();
     const { cookie } = makeAuthedUserAndCookie(deps, "alice@example.com");

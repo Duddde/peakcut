@@ -65,6 +65,7 @@ const KIND_LABELS: Record<JobKind, string> = {
   analysis: "analyse(s)",
   tracking: "détection(s) de cadrage",
   render: "rendu(s)",
+  motion: "motion design(s)",
 };
 
 /**

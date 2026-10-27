@@ -48,7 +48,7 @@ export interface CropRectParams {
  * frame, centered on a point and pushed back inside the frame when that
  * point is near an edge.
  *
- * Shared with the shot-by-shot framing (buildSpeakerFraming) so that a
+ * Shared with the shot-by-shot framing (buildFaceFraming) so that a
  * clip whose crop follows the speaker and a clip with one static crop are
  * cut from the source exactly the same way — a shot is a different centre,
  * never a different window.

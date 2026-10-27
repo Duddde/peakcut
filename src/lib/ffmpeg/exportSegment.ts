@@ -370,6 +370,7 @@ export async function exportSegment(input: ExportSegmentInput): Promise<ExportSe
           primaryColorHex: renderPlan.subtitleStyle.primaryColorHex,
           marginVerticalScale: renderPlan.subtitleStyle.marginVerticalScale,
           emphasizeKeywords: renderPlan.subtitleStyle.emphasizeKeywords,
+          motionCards: renderPlan.motion ?? [],
         }
       : {}),
   });

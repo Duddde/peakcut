@@ -54,7 +54,9 @@ export const PUBLIC_TRIAL_LIMITS: PublicTrialLimits = {
   startsWindowMs: 60 * 60 * 1000,
   maxProjectsPerTrial: 10,
   maxDownloadsPerTrial: 10,
-  maxJobsPerKind: { transcription: 10, analysis: 20, tracking: 10, render: 10 },
+  // Claude Motion bills the operator's Anthropic account per request: an
+  // anonymous visitor does not get to spend it.
+  maxJobsPerKind: { transcription: 10, analysis: 20, tracking: 10, render: 10, motion: 0 },
   jobRequestsPerMinute: 20,
   previewsPerWindow: 30,
   previewsWindowMs: 60 * 60 * 1000,

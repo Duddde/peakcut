@@ -217,7 +217,7 @@ export function buildRenderPlan(templateId: EffectTemplateId, context: BuildRend
     overlays: [],
     // Nor does a template invent a framing: which face to follow is a
     // fact about the video, read off a real detection by the tracking
-    // job (see lib/tracking/buildSpeakerFraming), never a guess made
+    // job (see lib/tracking/buildFaceFraming), never a guess made
     // from the transcript alone. No shots means the clip keeps the
     // single crop its variant already carries.
     framing: [],

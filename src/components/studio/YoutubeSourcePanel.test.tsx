@@ -182,4 +182,79 @@ describe("YoutubeSourcePanel", () => {
     resolveFirst(jsonResponse({ ok: false, error: "Arrêt du test." }, 400));
     await screen.findByText(/arrêt du test/i);
   });
+
+  describe("with the automatic pipeline", () => {
+    const PIPELINE = { providerId: "openai", trackProvider: "local-subject" };
+
+    /** download (job-1) → transcription (job-2, last step): the server's chain, as the routes report it. */
+    function chainFetch() {
+      const download = jobPayload({
+        payload: { url: VALID_URL, __chain: [{ kind: "transcription", payload: { providerId: "openai" } }] },
+      });
+      const transcription = jobPayload({
+        id: "job-2",
+        kind: "transcription",
+        status: "succeeded",
+        progress: 100,
+        payload: { providerId: "openai" },
+        idempotencyKey: "chain:job-1",
+      });
+      return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/download-youtube") return jsonResponse({ ok: true, job: download }, 201);
+        if (url === "/api/jobs/job-1") return jsonResponse({ ok: true, job: { ...download, status: "succeeded", progress: 100 } });
+        if (url === "/api/projects/proj-1/jobs") return jsonResponse({ ok: true, jobs: [transcription] });
+        if (url === "/api/jobs/job-2") return jsonResponse({ ok: true, job: transcription });
+        throw new Error(`unexpected fetch ${url}`);
+      });
+    }
+
+    it("starts the whole pipeline as soon as a valid link is pasted, without a click", async () => {
+      const fetchMock = chainFetch();
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      const onDownloaded = vi.fn();
+
+      render(<YoutubeSourcePanel projectId="proj-1" pipeline={PIPELINE} onDownloaded={onDownloaded} />);
+      fireEvent.paste(screen.getByLabelText(/lien youtube/i), {
+        clipboardData: { getData: () => VALID_URL },
+      });
+
+      await waitFor(() => expect(onDownloaded).toHaveBeenCalledTimes(1));
+      // The last step ends the walk: nothing is looked up after it.
+      expect(onDownloaded.mock.calls[0][0].id).toBe("job-2");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/download-youtube");
+      expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+        url: VALID_URL,
+        projectId: "proj-1",
+        pipeline: PIPELINE,
+      });
+      expect(screen.getByText(/transcription mot à mot/i)).toBeInTheDocument();
+    });
+
+    it("lets a pasted text that is not a YouTube link through, without starting anything", () => {
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      render(<YoutubeSourcePanel projectId="proj-1" pipeline={PIPELINE} />);
+      fireEvent.paste(screen.getByLabelText(/lien youtube/i), {
+        clipboardData: { getData: () => "pas un lien" },
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("starts on a link handed over by the projects list", async () => {
+      const fetchMock = chainFetch();
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      const onDownloaded = vi.fn();
+
+      render(
+        <YoutubeSourcePanel projectId="proj-1" pipeline={PIPELINE} autoSubmitUrl={VALID_URL} onDownloaded={onDownloaded} />
+      );
+
+      await waitFor(() => expect(onDownloaded).toHaveBeenCalledTimes(1));
+      expect(fetchMock.mock.calls.filter(([url]) => url === "/api/download-youtube")).toHaveLength(1);
+    });
+  });
 });

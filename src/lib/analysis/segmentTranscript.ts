@@ -17,7 +17,10 @@ import { IDEAL_MAX_SEC, IDEAL_MIN_SEC } from "@/lib/domain/shortFormDuration";
  *
  * 1. Boundaries land on sentence ends, never mid-sentence. A clip that opens
  *    halfway through a clause is unusable regardless of how well it scores,
- *    so those windows are never built in the first place.
+ *    so those windows are never built in the first place. Better still, they
+ *    land where a turn ends (see turnBoundaries): a sentence end inside a
+ *    turn — "c'est flop par exemple." before the speaker goes on after
+ *    someone's "ouais" — cuts a person off mid-thought.
  * 2. Durations target [MIN_DURATION_SEC, MAX_DURATION_SEC], which is exactly
  *    the plateau where scoreSegment's own durationFactor equals 1. The
  *    scorer and the generator therefore agree on what "short-form length"
@@ -84,6 +87,72 @@ function toUnit(words: TranscriptWord[]): SentenceUnit {
   };
 }
 
+/** A pause this long after a word ends the turn, whoever speaks next. */
+export const TURN_PAUSE_SEC = 0.6;
+/**
+ * Another voice saying this little ("ouais", "hmm", "ah bon ?") between
+ * two runs of the same speaker does not end that speaker's turn.
+ */
+const BACKCHANNEL_MAX_WORDS = 3;
+const BACKCHANNEL_MAX_SEC = 1.5;
+
+export interface TurnBoundaries {
+  /** canEndAfter[i]: a clip may end right after word i. */
+  canEndAfter: boolean[];
+  /** canStartAt[i]: a clip may start on word i. */
+  canStartAt: boolean[];
+}
+
+/**
+ * Where a turn of speech begins and ends: at a pause, or where the voice
+ * changes for more than a backchannel. A short interjection from someone
+ * else in the middle of a turn is not a change of speaker for this
+ * purpose — the person who was talking goes on right after it.
+ *
+ * Words without a speaker label count as one unknown voice: a transcript
+ * that is not diarized only has pauses to go by.
+ */
+export function turnBoundaries(words: TranscriptWord[]): TurnBoundaries {
+  const n = words.length;
+  const canEndAfter = new Array<boolean>(n).fill(false);
+  const canStartAt = new Array<boolean>(n).fill(false);
+  if (n === 0) return { canEndAfter, canStartAt };
+
+  // Runs of consecutive words from the same voice.
+  const runs: Array<{ from: number; to: number; speaker: string }> = [];
+  for (let i = 0; i < n; i++) {
+    const speaker = words[i].speaker ?? "";
+    const last = runs[runs.length - 1];
+    if (last && last.speaker === speaker) last.to = i;
+    else runs.push({ from: i, to: i, speaker });
+  }
+  const isBackchannel = runs.map((run, r) => {
+    const before = runs[r - 1];
+    const after = runs[r + 1];
+    const wordCount = run.to - run.from + 1;
+    const durationSec = words[run.to].endSec - words[run.from].startSec;
+    return Boolean(
+      before && after && before.speaker === after.speaker && wordCount <= BACKCHANNEL_MAX_WORDS && durationSec <= BACKCHANNEL_MAX_SEC
+    );
+  });
+
+  canStartAt[0] = true;
+  canEndAfter[n - 1] = true;
+  for (let r = 1; r < runs.length; r++) {
+    // A change of voice into or out of a backchannel is not a boundary.
+    if (isBackchannel[r] || isBackchannel[r - 1]) continue;
+    canEndAfter[runs[r].from - 1] = true;
+    canStartAt[runs[r].from] = true;
+  }
+  for (let i = 0; i < n - 1; i++) {
+    if (words[i + 1].startSec - words[i].endSec >= TURN_PAUSE_SEC) {
+      canEndAfter[i] = true;
+      canStartAt[i + 1] = true;
+    }
+  }
+  return { canEndAfter, canStartAt };
+}
+
 export interface SegmentCandidate {
   startSec: number;
   endSec: number;
@@ -100,11 +169,16 @@ export interface SegmentCandidate {
 export function buildCandidates(
   units: SentenceUnit[],
   minDurationSec: number,
-  maxDurationSec: number
+  maxDurationSec: number,
+  /** Which units a candidate may start on and end with; all of them when omitted. */
+  allowed?: { start: (unit: SentenceUnit) => boolean; end: (unit: SentenceUnit) => boolean }
 ): SegmentCandidate[] {
   const candidates: SegmentCandidate[] = [];
+  const canStart = allowed?.start ?? (() => true);
+  const canEnd = allowed?.end ?? (() => true);
 
   for (let i = 0; i < units.length; i++) {
+    if (!canStart(units[i])) continue;
     let words: TranscriptWord[] = [];
     for (let j = i; j < units.length; j++) {
       words = words.concat(units[j].words);
@@ -116,12 +190,12 @@ export function buildCandidates(
         // A lone over-long sentence is still offered; a multi-sentence
         // window that overshoots is not, since a shorter prefix of it
         // already fit and was emitted.
-        if (j === i) {
+        if (j === i && canEnd(units[j])) {
           candidates.push({ startSec, endSec, words: [...words], score: scoreSegment({ words, startSec, endSec }) });
         }
         break;
       }
-      if (durationSec >= minDurationSec) {
+      if (durationSec >= minDurationSec && canEnd(units[j])) {
         candidates.push({ startSec, endSec, words: [...words], score: scoreSegment({ words, startSec, endSec }) });
       }
     }
@@ -190,7 +264,16 @@ export function segmentTranscript(
   const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
 
   const units = splitIntoSentenceUnits(words);
-  const candidates = buildCandidates(units, minDurationSec, maxDurationSec);
+  // Clips that start and end on a turn boundary; only when there is none
+  // at all (a transcript with neither pauses nor voices to go by), any
+  // sentence end will do.
+  const boundaries = turnBoundaries(words);
+  const indexOf = new Map(words.map((word, index) => [word, index]));
+  const onTurns = buildCandidates(units, minDurationSec, maxDurationSec, {
+    start: (unit) => boundaries.canStartAt[indexOf.get(unit.words[0])!],
+    end: (unit) => boundaries.canEndAfter[indexOf.get(unit.words[unit.words.length - 1])!],
+  });
+  const candidates = onTurns.length > 0 ? onTurns : buildCandidates(units, minDurationSec, maxDurationSec);
 
   const selected =
     candidates.length > 0

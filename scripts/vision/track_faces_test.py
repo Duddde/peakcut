@@ -28,6 +28,7 @@ from track_faces import (  # noqa: E402  (path set above on purpose)
     accumulate_activity,
     close_activity_window,
     detect_size,
+    is_cut,
     match_detections,
     mouth_region,
 )
@@ -156,6 +157,21 @@ class DetectSizeTest(unittest.TestCase):
         width, height = detect_size(320, 180)
         self.assertEqual(width, 320)
         self.assertEqual(height, 180)
+
+
+
+class IsCutTest(unittest.TestCase):
+    """Thresholds measured on an edited show: still frames ~0.014, cuts 0.15-0.7."""
+
+    def test_an_isolated_spike_is_a_cut(self):
+        self.assertTrue(is_cut(0.012, 0.25, 0.015))
+
+    def test_a_movement_spread_over_several_frames_is_not(self):
+        # A gesture: as loud as a cut, but its neighbours move too.
+        self.assertFalse(is_cut(0.11, 0.13, 0.12))
+
+    def test_a_small_flicker_next_to_still_frames_is_not(self):
+        self.assertFalse(is_cut(0.0, 0.05, 0.0))
 
 
 if __name__ == "__main__":

@@ -236,6 +236,85 @@ describe("OpenAiTranscribeProvider — média au-delà de la limite d'upload", (
     expect(cleanup).toHaveBeenCalled();
   });
 
+  describe("a recording longer than the model accepts", () => {
+    /** Two pieces, each answered with one word at 1 s of its own audio, speaker "A". */
+    async function chunkedSetup() {
+      const { extractAudio, cleanup } = await fakeExtraction(1024);
+      const chunkA = path.join(dir, "chunk-0.mp3");
+      const chunkB = path.join(dir, "chunk-1.mp3");
+      await writeFile(chunkA, "a");
+      await writeFile(chunkB, "b");
+      const splitAudio = vi.fn(async () => [
+        { path: chunkA, startSec: 0, endSec: 1300 },
+        { path: chunkB, startSec: 1300, endSec: 2042.8 },
+      ]);
+      const uploaded: string[] = [];
+      const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+        const file = (init?.body as FormData).get("file") as File;
+        uploaded.push(file.name);
+        const word = file.name === "chunk-0.mp3" ? "Bonjour" : "Salut";
+        return new Response(
+          JSON.stringify({ language: "fr", words: [{ word, start: 1, end: 1.5, speaker: "A", confidence: 0.9 }] }),
+          { status: 200 }
+        );
+      }) as unknown as typeof fetch;
+      return { extractAudio, cleanup, splitAudio, fetchImpl, uploaded };
+    }
+
+    it("transcribes it in pieces and puts them back on the recording's own clock", async () => {
+      vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+      const { extractAudio, cleanup, splitAudio, fetchImpl, uploaded } = await chunkedSetup();
+
+      const transcript = await new OpenAiTranscribeProvider({
+        fetchImpl,
+        extractAudio,
+        splitAudio,
+        probeDuration: async () => 2042.8,
+      }).transcribe({ mediaPath: bigMediaPath });
+
+      expect(splitAudio).toHaveBeenCalledWith(expect.any(String), 1320);
+      expect(uploaded.sort()).toEqual(["chunk-0.mp3", "chunk-1.mp3"]);
+      expect(transcript.words.map((w) => [w.text, w.startSec, w.speaker])).toEqual([
+        ["Bonjour", 1, "A·1"],
+        ["Salut", 1301, "A·2"],
+      ]);
+      expect(cleanup).toHaveBeenCalled();
+    });
+
+    it("fails as a whole when one piece fails, and still cleans the audio up", async () => {
+      vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+      const { extractAudio, cleanup, splitAudio } = await chunkedSetup();
+      const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+        const file = (init?.body as FormData).get("file") as File;
+        return file.name === "chunk-1.mp3"
+          ? new Response("nope", { status: 500 })
+          : new Response(JSON.stringify({ words: [] }), { status: 200 });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        new OpenAiTranscribeProvider({ fetchImpl, extractAudio, splitAudio, probeDuration: async () => 2042.8 }).transcribe({
+          mediaPath: bigMediaPath,
+        })
+      ).rejects.toBeInstanceOf(TranscriptHttpError);
+      expect(cleanup).toHaveBeenCalled();
+    });
+
+    it("sends a recording within the limit in one request, as before", async () => {
+      vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
+      const smallPath = path.join(dir, "court.mp4");
+      await writeFile(smallPath, "petit fichier");
+      const splitAudio = vi.fn();
+      const { fetchImpl } = okFetch();
+
+      await new OpenAiTranscribeProvider({ fetchImpl, splitAudio, probeDuration: async () => 1400 }).transcribe({
+        mediaPath: smallPath,
+      });
+
+      expect(splitAudio).not.toHaveBeenCalled();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("leaves a file that already fits completely untouched — no ffmpeg, no re-encoding", async () => {
     vi.stubEnv("OPENAI_API_KEY", "fake-key-for-test-only");
     const smallPath = path.join(dir, "court.mp4");

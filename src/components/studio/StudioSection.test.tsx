@@ -747,5 +747,87 @@ describe("StudioSection — remontée des erreurs de job", () => {
         screen.queryByRole("button", { name: /confirmer les droits/i })
       ).not.toBeInTheDocument();
     });
+
+    it("drops the attestation when the server does not ask for it, and renders straight away", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/jobs" && init?.method === "POST") {
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({
+              ok: true,
+              job: {
+                id: "render-1",
+                projectId: "p1",
+                kind: "render",
+                status: "succeeded",
+                progress: 100,
+                attempts: 1,
+                maxAttempts: 3,
+                payload: {},
+                result: null,
+                errorCode: null,
+                errorMessage: null,
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                startedAt: null,
+                finishedAt: null,
+                idempotencyKey: null,
+              },
+            }),
+          } as Response;
+        }
+        return { ok: false, status: 503, json: async () => ({ ok: false }) } as Response;
+      });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      render(
+        <StudioSection initialProject={ordinaryProject()} projectId="p1" onSave={vi.fn()} rightsConfirmationRequired={false} />
+      );
+
+      expect(screen.queryByRole("button", { name: /confirmer les droits/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /^lancer le rendu$/i }));
+      expect(await screen.findByText(/rendu terminé et vérifié/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("automatic clip preview", () => {
+    function projectWithMedia(): Project {
+      const project = makeProject();
+      return { ...project, source: { ...project.source, localFilePath: "/data/downloads/x/v.mp4" } };
+    }
+
+    it("previews the selected clip on its own, sending the clip being edited and never a path", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/preview-segment") {
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({ ok: true, url: "/api/preview-segment/abc", durationSec: 5 }),
+          } as Response;
+        }
+        return { ok: false, status: 503, json: async () => ({ ok: false }) } as Response;
+      });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      render(<StudioSection initialProject={projectWithMedia()} projectId="p1" onSave={vi.fn()} />);
+
+      const video = await screen.findByTestId("auto-preview-video", {}, { timeout: 4000 });
+      expect(video).toHaveAttribute("src", "/api/preview-segment/abc");
+      const call = fetchMock.mock.calls.find(([url]) => url === "/api/preview-segment");
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body).toMatchObject({ projectId: "p1", segmentId: "demo-segment-1", variantId: "v1" });
+      expect(body.segment.id).toBe("demo-segment-1");
+      expect(JSON.stringify(body)).not.toContain("/data/downloads");
+    });
+
+    it("is not offered on the public demo nor without media", () => {
+      render(<StudioSection initialProject={makeProject()} projectId="p1" onSave={vi.fn()} />);
+      expect(screen.queryByTestId("auto-preview-panel")).not.toBeInTheDocument();
+      render(<StudioSection initialProject={projectWithMedia()} publicDemo />);
+      expect(screen.queryByTestId("auto-preview-panel")).not.toBeInTheDocument();
+    });
   });
 });

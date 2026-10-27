@@ -45,6 +45,7 @@ function noopHandlers(overrides: Partial<JobHandlers> = {}): JobHandlers {
     analysis: alwaysThrow,
     tracking: alwaysThrow,
     render: alwaysThrow,
+    motion: alwaysThrow,
     ...overrides,
   };
 }
@@ -210,6 +211,7 @@ describe("runJobWorker — chained pipeline", () => {
         analysis: record("analysis"),
         tracking: record("tracking"),
         render: record("render"),
+        motion: record("motion"),
       },
       maxIterations: 10,
       newId: () => `chained-${++id}`,

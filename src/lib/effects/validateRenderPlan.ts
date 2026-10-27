@@ -1,4 +1,5 @@
 import { isValidAssetId } from "@/lib/assets/imageAsset";
+import { validateMotionCards } from "@/lib/motion/types";
 import {
   ATTACK_SEC_MAX,
   ATTACK_SEC_MIN,
@@ -338,6 +339,7 @@ export function validateRenderPlan(plan: RenderPlan): RenderPlanValidationResult
 
   validateOverlays(plan, minCutStart, maxCutEnd, errors);
   validateFraming(plan, minCutStart, maxCutEnd, errors);
+  errors.push(...validateMotionCards(plan.motion ?? [], maxCutEnd));
   validatePerspectiveMoves(plan, minCutStart, maxCutEnd, errors);
 
   if (plan.safeZones.length === 0) {

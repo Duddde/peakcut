@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import type { ReadAudioEnvelope } from "@/lib/ffmpeg/audioEnvelope";
+import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -667,11 +668,10 @@ describe("createDefaultJobHandlers", () => {
       jobs.createJob({ id: "job-1", projectId: project.id, kind: "tracking", payload: { provider: "local-subject" }, now: "2026-01-01T00:00:00.000Z" });
       const claimed = jobs.claimNextJob()!;
       const result = (await handlers.tracking({ job: claimed, reportProgress: () => {} })) as {
-        speakerFraming: { assignedSpeakers: number; framedSegments: number; reasons: string[] };
+        speakerFraming: { cutsDetected: number; framedSegments: number; notes: string[] };
         track: FrameTrack;
       };
 
-      expect(result.speakerFraming.assignedSpeakers).toBe(2);
       expect(result.speakerFraming.framedSegments).toBe(1);
       // The boxes themselves stay out of the stored result.
       expect(result.track.subjects).toBeUndefined();
@@ -685,6 +685,66 @@ describe("createDefaultJobHandlers", () => {
       // The first speaker is the left face, the second the right one.
       expect(framing[0].rect.x).toBeLessThan(framing[1].rect.x);
       expect(validateRenderPlan(persisted!.segments[0].renderPlan!)).toEqual({ ok: true, errors: [] });
+    } finally {
+      await rm(exportsBaseDir, { recursive: true, force: true });
+      await rm(workDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("tracking follows an edited show's close-ups across its camera cuts", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const workDir = await mkdtemp(path.join(tmpdir(), "peakcut-handlers-cuts-"));
+    try {
+      const sourcePath = path.join(workDir, "source.mp4");
+      await createSyntheticVideo(sourcePath, 3);
+      const segment = {
+        ...makeSegment("seg-1", 0, 12),
+        renderPlan: buildRenderPlan("speaker-focus", { segmentId: "seg-1", segmentDurationSec: 12 }),
+      };
+      const project = baseProject({
+        segments: [segment],
+        source: { ...baseProject().source, localFilePath: sourcePath, durationSec: 12 },
+      });
+      projects.createProject(owner.id, project);
+
+      // Close-ups alternating every 3 s: one face per shot, left then
+      // right, each seen in a single detection — the case grouping drops.
+      const cuts = [3, 6, 9];
+      const detections = [0, 3, 6, 9].map((tSec, i) => ({
+        tSec: tSec + 0.1,
+        x: i % 2 === 0 ? 0.15 : 0.6,
+        y: 0.25,
+        width: 0.2,
+        height: 0.35,
+        score: 0.9,
+      }));
+      const track: FrameTrack = {
+        keyframes: [{ tSec: 0, cx: 0.5, cy: 0.5, confidence: 0.9 }],
+        fallbackUsed: false,
+        method: "fake-real-detector",
+        subjects: [],
+        detections,
+        cuts,
+      };
+      const handlers = createDefaultJobHandlers({ db, exportsBaseDir, trackerFactory: () => makeFakeTracker(track) });
+
+      jobs.createJob({ id: "job-1", projectId: project.id, kind: "tracking", payload: { provider: "local-subject" }, now: "2026-01-01T00:00:00.000Z" });
+      const result = (await handlers.tracking({ job: jobs.claimNextJob()!, reportProgress: () => {} })) as {
+        speakerFraming: { cutsDetected: number; framedSegments: number };
+        track: FrameTrack;
+      };
+
+      expect(result.speakerFraming.cutsDetected).toBe(3);
+      expect(result.track.detections).toBeUndefined();
+      const framing = projects.getProjectById(project.id)!.segments[0].renderPlan!.framing;
+      expect(framing.map((shot) => [shot.startSec, shot.endSec])).toEqual([
+        [0, 3],
+        [3, 6],
+        [6, 9],
+        [9, 12],
+      ]);
+      expect(framing[0].rect.x).toBeLessThan(framing[1].rect.x);
+      expect(framing[2].rect.x).toBe(framing[0].rect.x);
     } finally {
       await rm(exportsBaseDir, { recursive: true, force: true });
       await rm(workDir, { recursive: true, force: true });
@@ -724,12 +784,11 @@ describe("createDefaultJobHandlers", () => {
       jobs.createJob({ id: "job-1", projectId: project.id, kind: "tracking", payload: { provider: "local-subject" }, now: "2026-01-01T00:00:00.000Z" });
       const claimed = jobs.claimNextJob()!;
       const result = (await handlers.tracking({ job: claimed, reportProgress: () => {} })) as {
-        speakerFraming: { assignedSpeakers: number; framedSegments: number; reasons: string[] };
+        speakerFraming: { cutsDetected: number; framedSegments: number; notes: string[] };
       };
 
-      expect(result.speakerFraming.assignedSpeakers).toBe(0);
       expect(result.speakerFraming.framedSegments).toBe(0);
-      expect(result.speakerFraming.reasons.join(" ")).toMatch(/transcription/i);
+      expect(result.speakerFraming.notes.join(" ")).toMatch(/aucun visage/i);
 
       const persisted = projects.getProjectById(project.id);
       expect(persisted!.segments[0].renderPlan!.framing).toEqual([]);
@@ -830,6 +889,74 @@ describe("createDefaultJobHandlers", () => {
       await rm(workDir, { recursive: true, force: true });
     }
   }, 30000);
+
+  it("analysis puts fresh clips' cuts in the audio's pauses, with a plan drawn for the final bounds", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const words = longTranscriptWords(120);
+    const project = baseProject({
+      segments: [],
+      transcript: { language: "fr", providerId: "test", words },
+      source: { ...baseProject().source, localFilePath: "/media/source.mp4", durationSec: 300 },
+    });
+    projects.createProject(owner.id, project);
+    // Loud everywhere, except a quiet 0.3 s before every whole second:
+    // each clip's start can move back into one of them.
+    const readAudioEnvelope: ReadAudioEnvelope = async (_path, startSec, durationSec, frameSec) => {
+      const levels: number[] = [];
+      for (let t = startSec; t < startSec + durationSec; t += frameSec) {
+        const fraction = t + frameSec / 2 - Math.floor(t + frameSec / 2);
+        levels.push(fraction > 0.6 && fraction < 0.9 ? 0.01 : 0.3);
+      }
+      return { startSec, frameSec, levels };
+    };
+    const handlers = createDefaultJobHandlers({ db, exportsBaseDir, readAudioEnvelope });
+
+    jobs.createJob({ id: "job-1", projectId: project.id, kind: "analysis", payload: {}, now: "2026-01-01T00:00:00.000Z" });
+    const result = (await handlers.analysis({ job: jobs.claimNextJob()!, reportProgress: () => {} })) as {
+      segments: Segment[];
+    };
+
+    expect(result.segments.length).toBeGreaterThan(0);
+    for (const segment of result.segments) {
+      // Moved back into the pause before its first word (a clip at the
+      // very start of the video has nowhere earlier to go)…
+      if (segment.words[0].startSec > 0.5) expect(segment.startSec).toBeLessThan(segment.words[0].startSec);
+      else expect(segment.startSec).toBeLessThanOrEqual(segment.words[0].startSec);
+      // …and its plan still covers the whole clip, breath included.
+      const plan = segment.renderPlan!;
+      expect(validateRenderPlan(plan)).toEqual({ ok: true, errors: [] });
+      expect(plan.cuts[0].startSec).toBe(0);
+    }
+  });
+
+  it("motion saves the cards Claude designs onto each clip's plan, and only on the clip asked for", async () => {
+    const { db, projects, jobs, owner, exportsBaseDir } = await setup();
+    const words = longTranscriptWords(60);
+    const plan = (id: string, duration: number) => buildRenderPlan("speaker-focus", { segmentId: id, segmentDurationSec: duration });
+    const project = baseProject({
+      transcript: { language: "fr", providerId: "test", words },
+      segments: [
+        { ...makeSegment("seg-1", 0, 20), renderPlan: plan("seg-1", 20) },
+        { ...makeSegment("seg-2", 30, 50), renderPlan: plan("seg-2", 20) },
+      ],
+    });
+    projects.createProject(owner.id, project);
+    const design = vi.fn(async ({ clipStartSec }: { clipStartSec: number }) => [
+      { id: "motion-1", kind: "keyword" as const, text: `Carte ${clipStartSec}`, detail: null, items: [], startSec: 1, endSec: 3, position: "top" as const },
+    ]);
+    const handlers = createDefaultJobHandlers({ db, exportsBaseDir, motionDesigner: { design } });
+
+    jobs.createJob({ id: "job-1", projectId: project.id, kind: "motion", payload: { segmentId: "seg-2" }, now: "2026-01-01T00:00:00.000Z" });
+    await handlers.motion({ job: jobs.claimNextJob()!, reportProgress: () => {} });
+
+    expect(design).toHaveBeenCalledTimes(1);
+    expect(design.mock.calls[0][0]).toMatchObject({ clipStartSec: 30, clipEndSec: 50 });
+    const saved = projects.getProjectById(project.id)!.segments;
+    expect(saved.find((s) => s.id === "seg-1")!.renderPlan!.motion ?? []).toEqual([]);
+    const seg2 = saved.find((s) => s.id === "seg-2")!.renderPlan!;
+    expect(seg2.motion?.map((c) => c.text)).toEqual(["Carte 30"]);
+    expect(validateRenderPlan(seg2)).toEqual({ ok: true, errors: [] });
+  });
 
   it("analysis gives every candidate clip an edit to start from", async () => {
     const { db, projects, jobs, owner, exportsBaseDir } = await setup();

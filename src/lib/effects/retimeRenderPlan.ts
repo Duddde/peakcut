@@ -9,6 +9,7 @@ import {
   type PerspectiveMove,
   type RenderPlan,
 } from "./types";
+import { retimeMotionCards } from "@/lib/motion/types";
 
 /** Clip-relative time, kept inside the clip it belongs to. */
 function clampToClip(tSec: number, lastEnd: number): number {
@@ -119,6 +120,7 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number, offsetSe
       overlays: [],
       framing: [],
       perspectiveMoves: [],
+      motion: [],
     };
   }
 
@@ -159,6 +161,7 @@ export function retimeRenderPlan(plan: RenderPlan, durationSec: number, offsetSe
       })),
       lastEnd
     ),
+    ...(plan.motion ? { motion: retimeMotionCards(plan.motion, lastEnd, offset) } : {}),
     // A clip always keeps at least one keyframe: an empty list would make
     // the export fall back to a static crop without saying why.
     zoomKeyframes: keyframes.length > 0 ? keyframes : [{ tSec: 0, scale: ZOOM_SCALE_MIN }],

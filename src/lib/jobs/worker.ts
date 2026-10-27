@@ -16,6 +16,7 @@ export interface JobHandlers {
   analysis: JobHandler;
   tracking: JobHandler;
   render: JobHandler;
+  motion: JobHandler;
 }
 
 export interface RunJobWorkerOptions {

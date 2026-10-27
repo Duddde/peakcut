@@ -13,10 +13,12 @@ import {
 import { buildDefaultSafeZones } from "@/lib/domain/defaultSafeZones";
 import { buildDefaultVariants } from "@/lib/domain/defaultVariants";
 import { runJob, runPipeline } from "@/lib/jobs/jobClient";
-import { AUTO_PIPELINE_ORDER } from "@/lib/jobs/chain";
 import type { JobKind } from "@/lib/jobs/types";
 import { ScoreExplanation } from "@/components/editor/ScoreExplanation";
 import { Timeline } from "@/components/editor/Timeline";
+import { ClipTrimmer } from "@/components/editor/ClipTrimmer";
+import { MotionPanel } from "@/components/editor/MotionPanel";
+import type { MotionCard } from "@/lib/motion/types";
 import { TranscriptEditor } from "@/components/editor/TranscriptEditor";
 import { VariantPicker } from "@/components/editor/VariantPicker";
 import { EffectsPanel } from "@/components/editor/EffectsPanel";
@@ -31,9 +33,23 @@ import { authorizeExport, confirmRights } from "@/lib/workflow/workflow";
 import { PUBLIC_DEMO_CALLBACK_URL, relativeUrlOf } from "@/lib/auth/safeCallbackUrl";
 import { SourceIngestPanel } from "./SourceIngestPanel";
 import { YoutubeSourcePanel } from "./YoutubeSourcePanel";
+import {
+  mergePipelineStep,
+  PIPELINE_STEP_LABELS,
+  PipelineSteps,
+  plannedPipelineSteps,
+  type PipelineStepView,
+} from "./PipelineSteps";
 
 /** Server-side cap of a project preview window (see MAX_DURATION_SEC in /api/preview-segment). */
 const PROJECT_PREVIEW_MAX_DURATION_SEC = 15;
+
+/**
+ * How long the studio waits after the last edit before asking for a new
+ * preview: long enough that typing a word or dragging a handle asks once,
+ * short enough that the clip on screen keeps up with the edit.
+ */
+const AUTO_PREVIEW_DEBOUNCE_MS = 1200;
 
 /** Mirrors PREVIEW_MAX_DURATION_SEC in src/lib/ffmpeg/renderPreviewSegment.ts — kept as a plain constant here since that module pulls in node:child_process and must never be imported into client code. */
 const PREVIEW_MAX_DURATION_SEC = 20;
@@ -111,51 +127,15 @@ export interface SaveResult {
   error?: string;
 }
 
-/** What each automatic-pipeline step is called, in the user's words rather than the queue's. */
-const PIPELINE_STEP_LABELS: Record<JobKind, string> = {
-  download: "Téléchargement de la vidéo",
-  transcription: "Transcription mot à mot",
-  analysis: "Découpage et classement des clips",
-  tracking: "Cadrage sur le visage",
-  render: "Export",
-};
-
-interface PipelineStepView {
-  kind: JobKind;
-  status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
-  progress: number;
-}
-
-/**
- * The steps the pipeline is expected to run, shown before anything has
- * started so the user knows what they just asked for. They are replaced
- * by the real jobs as those appear — the plan is a label, never the
- * source of truth about what ran.
- */
-function plannedPipelineSteps(startKind: JobKind): PipelineStepView[] {
-  const from = AUTO_PIPELINE_ORDER.indexOf(startKind);
-  const kinds = from < 0 ? [startKind] : AUTO_PIPELINE_ORDER.slice(from);
-  return kinds.map((kind) => ({ kind, status: "pending", progress: 0 }));
-}
-
-function mergePipelineStep(
-  steps: PipelineStepView[],
-  job: { kind: JobKind; status: string; progress: number }
-): PipelineStepView[] {
-  const status: PipelineStepView["status"] =
-    job.status === "queued" ? "pending" : (job.status as PipelineStepView["status"]);
-  const updated = { kind: job.kind, status, progress: job.progress };
-  const index = steps.findIndex((step) => step.kind === job.kind);
-  if (index < 0) return [...steps, updated];
-  return steps.map((step, i) => (i === index ? updated : step));
-}
-
 export function StudioSection({
   initialProject,
   onSave,
   projectId,
   publicDemo = false,
   publicTrial,
+  rightsConfirmationRequired = true,
+  autoStartUrl,
+  claudeMotionConfigured = false,
 }: {
   initialProject: Project;
   /**
@@ -176,6 +156,17 @@ export function StudioSection({
    * limits, and never open AccountGate.
    */
   publicTrial?: PublicTrialInfo;
+  /**
+   * False when the server does not ask for the rights attestation (under
+   * `next dev`, see isRightsConfirmationRequired): the studio then neither
+   * shows it nor blocks the render on it. The render job checks the same
+   * rule on its side.
+   */
+  rightsConfirmationRequired?: boolean;
+  /** A YouTube link pasted on the projects list: the whole pipeline starts on it at once. */
+  autoStartUrl?: string;
+  /** Whether Claude Motion can run on this server (an Anthropic credential is configured). */
+  claudeMotionConfigured?: boolean;
 }) {
   const isPublicDemo = publicDemo;
   const isPublicTrial = Boolean(publicTrial) && !publicDemo;
@@ -194,11 +185,15 @@ export function StudioSection({
     FALLBACK_PROVIDER_OPTIONS
   );
   const [selectedProviderId, setSelectedProviderId] = useState("");
+  /** Set once /api/transcript-providers has answered (or failed): only then is it known whether a pasted link can run the full pipeline. */
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   const [transcribeStatus, setTranscribeStatus] = useState<AnalyzeStatus>("idle");
   const [transcribeMessage, setTranscribeMessage] = useState<string | null>(null);
 
+  // The real detector by default: it frames on whoever speaks, and fails
+  // explicitly (never silently centered) when OpenCV is not installed.
   const [trackProviderId, setTrackProviderId] = useState<"stable-center-fallback" | "local-subject">(
-    "stable-center-fallback"
+    "local-subject"
   );
   const [trackStatus, setTrackStatus] = useState<AnalyzeStatus>("idle");
   const [trackMessage, setTrackMessage] = useState<string | null>(null);
@@ -218,6 +213,8 @@ export function StudioSection({
   const [pipelineStatus, setPipelineStatus] = useState<AnalyzeStatus>("idle");
   const [pipelineMessage, setPipelineMessage] = useState<string | null>(null);
   const [pipelineSteps, setPipelineSteps] = useState<PipelineStepView[]>([]);
+  const [motionGenerating, setMotionGenerating] = useState(false);
+  const [motionMessage, setMotionMessage] = useState<string | null>(null);
 
   const [downloadStatus, setDownloadStatus] = useState<AnalyzeStatus>("idle");
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
@@ -294,10 +291,12 @@ export function StudioSection({
             ? current
             : options.find((p) => p.configured)?.id ?? ""
         );
+        setProvidersLoaded(true);
       })
       .catch(() => {
         // The studio must stay usable even if this informational request
         // fails; transcription is then simply reported as unavailable.
+        if (!cancelled) setProvidersLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -679,7 +678,7 @@ export function StudioSection({
 
     setPipelineStatus("loading");
     setPipelineMessage("Traitement automatique en cours…");
-    setPipelineSteps(plannedPipelineSteps(startKind));
+    setPipelineSteps(plannedPipelineSteps(startKind, { motion: claudeMotionConfigured }));
 
     try {
       const steps = await runPipeline(
@@ -719,13 +718,52 @@ export function StudioSection({
     }
   }
 
+  /**
+   * Claude designs the selected clip's cards as a job (the request takes a
+   * few seconds to a minute), on the clip as saved; the cards it returns
+   * replace the clip's own here too, so they show up without a reload.
+   */
+  async function handleGenerateMotion() {
+    if (!projectId || !selectedSegment || isPublicDemo || isPublicTrial) return;
+    const segmentId = selectedSegment.id;
+    setMotionGenerating(true);
+    setMotionMessage(
+      dirty
+        ? "Claude conçoit les cartes du clip tel qu'il est enregistré : enregistrez d'abord pour qu'il voie vos dernières retouches."
+        : "Claude conçoit les cartes de ce clip…"
+    );
+    try {
+      const job = await runJob({
+        projectId,
+        kind: "motion",
+        payload: { segmentId },
+        idempotencyKey: `motion:${projectId}:${segmentId}:${Date.now()}`,
+      });
+      if (job.status !== "succeeded") throw new Error(job.errorMessage ?? "La génération a échoué.");
+      const result = job.result as { cardsBySegment?: Record<string, MotionCard[]> } | null;
+      const cards = result?.cardsBySegment?.[segmentId] ?? [];
+      updateSegment(segmentId, (segment) =>
+        segment.renderPlan ? { ...segment, renderPlan: { ...segment.renderPlan, motion: cards } } : segment
+      );
+      setMotionMessage(
+        cards.length > 0
+          ? `${cards.length} carte(s) proposée(s) par Claude : relisez-les, l'aperçu se met à jour.`
+          : "Claude n'a rien trouvé qui mérite une carte dans ce clip."
+      );
+    } catch (err) {
+      setMotionMessage(failureMessage(err, "Impossible de contacter le serveur pour Claude Motion."));
+    } finally {
+      setMotionGenerating(false);
+    }
+  }
+
   async function handleRender() {
     if (isPublicDemo) {
       requireAccountForCustomization();
       return;
     }
     if (!projectId || !selectedSegment) return;
-    if (!workflow.rights.confirmed || workflow.phase !== "export_authorized") {
+    if (rightsConfirmationRequired && (!workflow.rights.confirmed || workflow.phase !== "export_authorized")) {
       setRenderStatus("error");
       setRenderMessage("Export bloqué : confirmez les droits et autorisez l'export humainement.");
       return;
@@ -881,6 +919,85 @@ export function StudioSection({
 
   const hasMedia = Boolean(source.localFilePath);
   const hasConfiguredProvider = providerOptions.some((p) => p.configured);
+
+  /**
+   * What a pasted YouTube link runs after the download: the whole
+   * pipeline whenever a transcription provider can actually run, so that
+   * pasting is the only gesture. A trial runs its steps one by one (the
+   * server refuses it a chain), and without a provider there is nothing
+   * to chain — the panel then only downloads, and says so.
+   */
+  const youtubePipeline = useMemo(
+    () =>
+      !isPublicTrial &&
+      !isPublicDemo &&
+      providerOptions.some((p) => p.id === selectedProviderId && p.configured)
+        ? { providerId: selectedProviderId, trackProvider: trackProviderId }
+        : undefined,
+    [isPublicTrial, isPublicDemo, providerOptions, selectedProviderId, trackProviderId]
+  );
+
+  /**
+   * An account's project previews itself: the selected clip, as the
+   * export will cut, frame and caption it, is rendered at preview
+   * resolution as soon as it is selected and again after each edit — no
+   * render to launch, no save first, since the current (unsaved) clip
+   * travels with the request. A trial keeps its explicit button: its
+   * previews are counted.
+   */
+  const autoPreview = Boolean(projectId) && hasMedia && !isPublicTrial && !isPublicDemo;
+  const autoPreviewVariantId = selectedSegment
+    ? selectedVariantBySegment[selectedSegment.id] ?? selectedSegment.variants[0]?.id
+    : undefined;
+  const autoPreviewKey =
+    autoPreview && selectedSegment ? JSON.stringify([selectedSegment, autoPreviewVariantId]) : null;
+  const previewRequestRef = useRef<AbortController | null>(null);
+
+  async function handleAutoPreview(segment: Segment, variantId: string | undefined) {
+    if (!projectId) return;
+    previewRequestRef.current?.abort();
+    const controller = new AbortController();
+    previewRequestRef.current = controller;
+    // The previous clip stays on screen while the next one renders.
+    setPreviewStatus("loading");
+    setPreviewMessage("Mise à jour de l'aperçu…");
+    try {
+      const res = await fetch("/api/preview-segment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, segmentId: segment.id, variantId, segment }),
+        signal: controller.signal,
+      });
+      const json = await res.json();
+      if (controller.signal.aborted) return;
+      if (!res.ok || !json.ok) {
+        setPreviewStatus("error");
+        setPreviewMessage(json?.error ?? "Aperçu indisponible.");
+        return;
+      }
+      setPreviewUrl(json.url);
+      setPreviewStatus("success");
+      setPreviewMessage(
+        `Aperçu à jour : ${Number(json.durationSec).toFixed(1)} s, basse résolution. Le rendu final reste en 1080×1920.`
+      );
+    } catch {
+      if (controller.signal.aborted) return;
+      setPreviewStatus("error");
+      setPreviewMessage("Impossible de contacter le serveur d'aperçu.");
+    }
+  }
+
+  useEffect(() => {
+    if (!autoPreviewKey || !selectedSegment) return;
+    const segment = selectedSegment;
+    const variantId = autoPreviewVariantId;
+    const timer = window.setTimeout(() => void handleAutoPreview(segment, variantId), AUTO_PREVIEW_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // The key already captures the segment and variant; the handler is recreated every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPreviewKey]);
+
+  useEffect(() => () => previewRequestRef.current?.abort(), []);
   /**
    * Analysis is what turns a transcript into the project's first segment
    * (see the `analysis` handler in src/lib/jobs/handlers.ts), so it needs
@@ -1027,40 +1144,7 @@ export function StudioSection({
           {pipelineMessage}
         </p>
       </div>
-      {pipelineSteps.length > 0 && (
-        <ol className="space-y-1 text-xs">
-          {pipelineSteps.map((step) => (
-            <li key={step.kind} className="flex items-center gap-2">
-              <span
-                aria-hidden
-                className={`inline-block h-1.5 w-1.5 rounded-full ${
-                  step.status === "succeeded"
-                    ? "bg-emerald-400"
-                    : step.status === "running"
-                      ? "bg-amber-300"
-                      : step.status === "failed" || step.status === "cancelled"
-                        ? "bg-rose-400"
-                        : "bg-zinc-600"
-                }`}
-              />
-              <span className={step.status === "pending" ? "text-zinc-500" : "text-zinc-300"}>
-                {PIPELINE_STEP_LABELS[step.kind]}
-              </span>
-              <span className="text-zinc-600">
-                {step.status === "running"
-                  ? `${step.progress}%`
-                  : step.status === "succeeded"
-                    ? "terminé"
-                    : step.status === "failed"
-                      ? "échec"
-                      : step.status === "cancelled"
-                        ? "annulé"
-                        : "en attente"}
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
+      <PipelineSteps steps={pipelineSteps} />
       {!hasConfiguredProvider && (
         <p className="text-[11px] text-zinc-500">
           Le traitement automatique a besoin d&apos;un fournisseur de transcription configuré
@@ -1178,6 +1262,9 @@ export function StudioSection({
           onDownloaded={handleDownloaded}
           requiresAccount={isPublicDemo}
           onAccountRequired={requireAccountForCustomization}
+          pipeline={youtubePipeline}
+          autoSubmitUrl={providersLoaded ? autoStartUrl : undefined}
+        withMotion={claudeMotionConfigured}
         />
         {hasMedia ? (
           <>
@@ -1234,7 +1321,8 @@ export function StudioSection({
             className="w-full rounded-lg border border-white/10 bg-transparent px-3 py-2 text-lg font-semibold text-zinc-100 outline-none focus:border-amber-400/60"
           />
           <p className="mt-1 text-[11px] text-zinc-500">
-            Workflow : {workflow.phase} · droits confirmés : {workflow.rights.confirmed ? "oui" : "non"}
+            Workflow : {workflow.phase} · droits confirmés :{" "}
+            {rightsConfirmationRequired ? (workflow.rights.confirmed ? "oui" : "non") : "non requis (mode test)"}
           </p>
         </div>
         {onSave && (
@@ -1280,6 +1368,9 @@ export function StudioSection({
         onDownloaded={handleDownloaded}
         requiresAccount={isPublicDemo}
         onAccountRequired={requireAccountForCustomization}
+        pipeline={youtubePipeline}
+        autoSubmitUrl={providersLoaded ? autoStartUrl : undefined}
+        withMotion={claudeMotionConfigured}
       />
 
       {sourceCard}
@@ -1293,9 +1384,9 @@ export function StudioSection({
       <div className="space-y-2 rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
         <h3 className="text-sm font-semibold text-zinc-100">Cadrage automatique</h3>
         <p className="text-[11px] text-zinc-500">
-          Le repli centré ne détecte aucun visage réel — il garde simplement le cadre centré. Le
-          suivi de sujet local nécessite un moteur de détection externe configuré séparément
-          (PEAKCUT_TRACKER_COMMAND) et n&apos;est pas fourni par PeakCut.
+          Le suivi de sujet détecte les visages en local (OpenCV, voir requirements-vision.txt) et
+          cadre sur celui qui parle ; sans OpenCV il échoue explicitement. Le repli centré ne
+          détecte rien : il garde simplement le cadre centré.
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-zinc-400">
@@ -1306,7 +1397,7 @@ export function StudioSection({
               className="rounded-lg border border-white/10 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-amber-400/60"
             >
               <option value="stable-center-fallback">Centré stable (repli, sans détection)</option>
-              <option value="local-subject">Suivi de sujet local (moteur externe requis)</option>
+              <option value="local-subject">Suivi de celui qui parle (détection locale)</option>
             </select>
           </label>
           <button
@@ -1357,6 +1448,68 @@ export function StudioSection({
         onSplit={handleSplitSegment}
         onDelete={handleDeleteSegment}
       />
+
+      <ClipTrimmer
+        segment={selectedSegment}
+        // The whole transcript, so that a cut can move onto words the clip
+        // does not have yet.
+        words={initialProject.transcript?.words ?? selectedSegment.words}
+        totalDurationSec={Math.max(source.durationSec, 0, ...segments.map((s) => s.endSec))}
+        projectId={projectId}
+        readOnly={isPublicDemo}
+        onRetime={handleRetimeSegment}
+      />
+
+      {autoPreview && (
+        <div
+          data-testid="auto-preview-panel"
+          className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-zinc-900/60 p-5 sm:flex-row sm:items-start"
+        >
+          <div className="aspect-[9/16] w-full max-w-[270px] shrink-0 overflow-hidden rounded-lg bg-black">
+            {previewUrl ? (
+              <video
+                data-testid="auto-preview-video"
+                key={previewUrl}
+                src={previewUrl}
+                controls
+                autoPlay
+                muted
+                playsInline
+                className="h-full w-full"
+              />
+            ) : (
+              <p className="flex h-full items-center justify-center p-4 text-center text-xs text-zinc-500">
+                {previewStatus === "error" ? "Aperçu indisponible" : "Préparation de l'aperçu…"}
+              </p>
+            )}
+          </div>
+          <div className="min-w-0 space-y-2">
+            <h3 className="text-sm font-semibold text-zinc-100">Aperçu du clip</h3>
+            <p className="text-xs text-zinc-500">
+              Le clip sélectionné tel que l&apos;export le montera — cadrage, zoom, effets 3D,
+              illustrations et sous-titres — en basse résolution. Il se met à jour tout seul après
+              chaque modification, sans rendu à lancer ni enregistrement préalable.
+            </p>
+            <p
+              role="status"
+              aria-live="polite"
+              aria-label="Statut de l'aperçu"
+              className={`text-xs ${previewStatus === "error" ? "text-rose-300" : "text-zinc-400"}`}
+            >
+              {previewMessage}
+            </p>
+            {previewStatus === "error" && selectedSegment && (
+              <button
+                type="button"
+                onClick={() => void handleAutoPreview(selectedSegment, autoPreviewVariantId)}
+                className="rounded-lg border border-amber-400/50 px-3 py-1.5 text-xs font-semibold text-amber-300"
+              >
+                Réessayer
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         <div className="space-y-4 rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
@@ -1460,6 +1613,17 @@ export function StudioSection({
               generationAvailable={!isPublicTrial && !isPublicDemo}
             />
           )}
+          {projectId && !isPublicTrial && (
+            <MotionPanel
+              segment={selectedSegment}
+              configured={claudeMotionConfigured}
+              readOnly={isPublicDemo}
+              generating={motionGenerating}
+              message={motionMessage}
+              onGenerate={() => void handleGenerateMotion()}
+              onChange={(renderPlan) => updateSegment(selectedSegment.id, (s) => ({ ...s, renderPlan }))}
+            />
+          )}
           <VariantPicker
             variants={selectedSegment.variants}
             selectedVariantId={selectedVariantId}
@@ -1491,9 +1655,9 @@ export function StudioSection({
             changements.
           </p>
         )}
-        Mode validation humaine actif : aucun export ni aucune publication n&apos;est déclenché
-        automatiquement. Les droits sur la source doivent être confirmés par un humain avant tout
-        export.
+        {rightsConfirmationRequired
+          ? "Mode validation humaine actif : aucun export ni aucune publication n'est déclenché automatiquement. Les droits sur la source doivent être confirmés par un humain avant tout export."
+          : "Mode test : la confirmation des droits est désactivée sur ce serveur. Aucun export ni aucune publication n'est déclenché automatiquement."}
       </div>
       <div className="rounded-2xl border border-white/10 bg-zinc-900/60 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1509,7 +1673,7 @@ export function StudioSection({
             {renderStatus === "loading" ? "Rendu…" : isPublicTrial ? "Lancer le rendu de test" : "Lancer le rendu"}
           </button>
         </div>
-        {(isPublicTrial || (Boolean(projectId) && !isPublicDemo)) && (
+        {rightsConfirmationRequired && (isPublicTrial || (Boolean(projectId) && !isPublicDemo)) && (
           <div className="mt-3 space-y-2 rounded-lg border border-white/10 p-3 text-xs text-zinc-300">
             {workflow.rights.confirmed && workflow.phase === "export_authorized" ? (
               <p className="text-emerald-300">
@@ -1578,7 +1742,9 @@ export function StudioSection({
           {renderMessage ??
             (isPublicDemo
               ? "Connexion requise pour lancer un rendu réel. Validation humaine obligatoire avant export."
-              : "Validation humaine obligatoire avant export.")}
+              : rightsConfirmationRequired
+                ? "Validation humaine obligatoire avant export."
+                : "Mode test : export sans confirmation des droits.")}
         </p>
       </div>
 

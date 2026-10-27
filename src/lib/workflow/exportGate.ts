@@ -18,16 +18,24 @@ export interface ExportGateParams {
   hasLocalMediaFile: boolean;
   segmentEndSec: number;
   sourceDurationSec: number;
+  /**
+   * False skips the rights confirmation and export authorization checks —
+   * see isRightsConfirmationRequired. Defaults to true: a caller that does
+   * not say otherwise keeps the human gate.
+   */
+  rightsConfirmationRequired?: boolean;
 }
 
 export function getExportBlockReasons(params: ExportGateParams): string[] {
   const reasons: string[] = [];
 
-  if (!params.workflow.rights.confirmed) {
-    reasons.push("Les droits sur la source ne sont pas encore confirmés par un humain.");
-  }
-  if (params.workflow.phase !== "export_authorized") {
-    reasons.push("L'export n'a pas été explicitement autorisé pour ce projet.");
+  if (params.rightsConfirmationRequired !== false) {
+    if (!params.workflow.rights.confirmed) {
+      reasons.push("Les droits sur la source ne sont pas encore confirmés par un humain.");
+    }
+    if (params.workflow.phase !== "export_authorized") {
+      reasons.push("L'export n'a pas été explicitement autorisé pour ce projet.");
+    }
   }
   if (!params.hasLocalMediaFile) {
     reasons.push(

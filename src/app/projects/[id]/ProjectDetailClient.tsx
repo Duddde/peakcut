@@ -15,13 +15,32 @@ interface ProjectDetailClientProps {
   initialProject?: Project;
   /** Read-only public demo: never loaded nor saved through the API. */
   isDemo?: boolean;
+  /** A link pasted on the projects list (`?url=`): the studio starts the automatic pipeline on it. */
+  autoStartUrl?: string;
 }
 
-export default function ProjectDetailClient({ projectId, initialProject, isDemo = false }: ProjectDetailClientProps) {
+export default function ProjectDetailClient({
+  projectId,
+  initialProject,
+  isDemo = false,
+  autoStartUrl,
+}: ProjectDetailClientProps) {
   const [project, setProject] = useState<Project | null>(initialProject ?? null);
   const [state, setState] = useState<PageState>(initialProject ? "ready" : "loading");
   // Set only when the server says this project belongs to a public-trial actor.
   const [publicTrial, setPublicTrial] = useState<PublicTrialInfo | null>(null);
+  // Whatever the server says; until it has, the human gate stays up.
+  const [rightsConfirmationRequired, setRightsConfirmationRequired] = useState(true);
+  const [claudeMotionConfigured, setClaudeMotionConfigured] = useState(false);
+
+  // The link is dropped from the address bar once read, so that a reload
+  // (the studio reloads when the pipeline is done) never starts it again.
+  useEffect(() => {
+    if (!autoStartUrl) return;
+    const cleaned = new URL(window.location.href);
+    cleaned.searchParams.delete("url");
+    window.history.replaceState(window.history.state, "", cleaned.pathname + cleaned.search + cleaned.hash);
+  }, [autoStartUrl]);
 
   useEffect(() => {
     // Demo projects arrive pre-resolved from the server. Every other id goes
@@ -40,6 +59,8 @@ export default function ProjectDetailClient({ projectId, initialProject, isDemo 
         const parsed = parseProjectResponse(json.project);
         if (cancelled) return;
         setPublicTrial(json.access === "trial" ? parsePublicTrialInfo(json.trial) : null);
+        setRightsConfirmationRequired(json.rightsConfirmationRequired !== false);
+        setClaudeMotionConfigured(json.claudeMotionConfigured === true);
         setProject(parsed);
         setState("ready");
       } catch {
@@ -145,6 +166,9 @@ export default function ProjectDetailClient({ projectId, initialProject, isDemo 
               projectId={project.id}
               onSave={handleSave}
               publicTrial={publicTrial ?? undefined}
+              rightsConfirmationRequired={rightsConfirmationRequired}
+              autoStartUrl={autoStartUrl}
+              claudeMotionConfigured={claudeMotionConfigured}
             />
           )}
         </div>

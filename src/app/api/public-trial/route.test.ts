@@ -327,6 +327,23 @@ describe("public trial journey: YouTube → ephemeral project → studio jobs �
     expect((await jobs(req("/api/jobs", { method: "POST", body: { projectId, kind: "analysis" }, cookies }))).status).toBe(429);
   });
 
+  it("refuses a trial the chained pipeline on a download, as on /api/jobs", async () => {
+    vi.stubEnv("PEAKCUT_PUBLIC_TRIAL", "1");
+    const deps = createTestAppDeps();
+    const cookies = await startTrial(deps);
+    const projectId = (await createProject(deps, cookies)).json.project.id as string;
+    const download = createDownloadYoutubeHandler({ deps, rateLimiter: permissive(), trialRateLimiters: createPublicTrialRateLimiters() });
+
+    const res = await download(
+      req("/api/download-youtube", {
+        method: "POST",
+        body: { url: VALID_URL, projectId, rightsConfirmed: true, pipeline: { providerId: "openai" } },
+        cookies,
+      })
+    );
+    expect(res.status).toBe(403);
+  });
+
   it("caps trial previews per window", async () => {
     vi.stubEnv("PEAKCUT_PUBLIC_TRIAL", "1");
     const deps = createTestAppDeps();

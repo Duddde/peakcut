@@ -29,10 +29,22 @@ export interface FrameTrack {
    * Every subject the detection saw, not just the one the keyframes
    * follow. A single centered path cannot express "two people, and the
    * frame should be on whoever is talking"; this is what makes that
-   * possible downstream (see buildSpeakerFraming). Absent on trackers
+   * possible downstream (see buildFaceFraming). Absent on trackers
    * that have no notion of separate subjects.
    */
   subjects?: SubjectTrack[];
+  /**
+   * The source's camera cuts, in seconds, when the engine reports them.
+   * The frame has to change exactly there, and a face before a cut is not
+   * the face at the same place after it (see buildFaceFraming).
+   */
+  cuts?: number[];
+  /**
+   * Every detection, ungrouped. The framing needs the faces seen only once:
+   * in a show that changes angle every second, a close-up is often a
+   * single detection, which subject grouping drops as noise.
+   */
+  detections?: DetectedBoundingBox[];
 }
 
 export interface FrameTrackerInput {
@@ -105,7 +117,15 @@ export interface SubjectDetectionInput {
  * model — see CommandSubjectDetectionEngine for the one real, optional
  * implementation (a local external command).
  */
+/** What an engine that also watches the editing reports: the faces, and the camera cuts. */
+export interface SceneDetection {
+  detections: DetectedBoundingBox[];
+  cuts: number[];
+}
+
 export interface SubjectDetectionEngine {
   readonly id: string;
   detect(input: SubjectDetectionInput): Promise<DetectedBoundingBox[]>;
+  /** Optional: the faces and the camera cuts in one pass. Engines without it report no cuts. */
+  detectScene?(input: SubjectDetectionInput): Promise<SceneDetection>;
 }

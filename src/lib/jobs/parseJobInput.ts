@@ -94,7 +94,7 @@ export function parseCreateJobInput(raw: unknown): CreateJobInput {
  * job: `true` for its defaults, or an object to name the transcription
  * provider and tracking engine it should use.
  */
-function parsePipeline(raw: unknown): AutoPipelineOptions | null {
+export function parsePipeline(raw: unknown): AutoPipelineOptions | null {
   if (raw === undefined || raw === null || raw === false) return null;
   if (raw === true) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) {

@@ -43,7 +43,10 @@ describe("compileZoomFilter", () => {
       ],
     });
     expect(result.zoomApplied).toBe(true);
-    expect(result.filterFragment).toContain("lt(t");
+    // A ramp per change of scale, and a finite value while t is undefined
+    // (ffmpeg evaluates w and h once, at configuration).
+    expect(result.filterFragment).toContain("clip((t-");
+    expect(result.filterFragment).toContain("if(isnan(t),");
     expect(result.filterFragment).toContain("crop=");
     // Every crop parameter must be present.
     expect(result.filterFragment).toMatch(/w='[^']+'/);

@@ -1,4 +1,5 @@
 import type { NormalizedRect, SafeZone } from "@/lib/domain/types";
+import type { MotionCard } from "@/lib/motion/types";
 
 /**
  * Declarative, bounded "effect template" plan for a segment export.
@@ -178,6 +179,12 @@ export interface RenderPlan {
   framing: FramingShot[];
   /** 3D moves applied over the clip, in chronological order; empty = a flat frame. */
   perspectiveMoves: PerspectiveMove[];
+  /**
+   * Claude Motion cards (see lib/motion): animated text illustrating what
+   * is said. Optional so that every plan saved before them stays valid;
+   * absent and empty mean the same thing.
+   */
+  motion?: MotionCard[];
   subtitleStyle: SubtitleStyle;
   safeZones: SafeZone[];
   audioDucking: AudioDucking;
@@ -221,14 +228,17 @@ export const OVERLAY_MIN_SIZE = 0.02;
 /**
  * Framing bounds.
  *
- * The count is capped for a concrete reason: every shot adds a branch to
- * the animated `crop` expression on each of x, y, w and h, and
- * validateFilterGraph refuses a graph over 8000 characters. A plan that
- * went past the cap would compile into a filter nobody accepts and fall
- * back to a static crop — better to refuse the plan than to silently
+ * The count is capped for a concrete reason: every shot adds a term to
+ * the animated `crop` expression, and validateFilterGraph refuses a graph
+ * over 8000 characters. An edited show changes angle every second or two,
+ * so a 90-second clip framed on its camera cuts needs dozens of shots;
+ * cut-only shots compile to one ~25-character step each (see
+ * compileZoomFilter), and 120 of them stay well inside the limit. A plan
+ * that went past the cap would compile into a filter nobody accepts and
+ * fall back to a static crop — better to refuse the plan than to silently
  * render something else.
  */
-export const MAX_FRAMING_SHOTS_PER_PLAN = 16;
+export const MAX_FRAMING_SHOTS_PER_PLAN = 120;
 /** Below this, a reframe reads as a glitch rather than as a cut. */
 export const MIN_FRAMING_SHOT_DURATION_SEC = 0.4;
 export const FRAMING_TRANSITION_SEC_MIN = 0;

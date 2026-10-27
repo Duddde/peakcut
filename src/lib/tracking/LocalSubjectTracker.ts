@@ -85,12 +85,25 @@ function selectMainSubject(boxes: DetectedBoundingBox[], previous: SelectedPoint
   return best;
 }
 
-function smoothPoints(points: SelectedPoint[], window: number): SelectedPoint[] {
+/** Index of the camera shot a time falls in: how many cuts precede it. */
+function shotIndexAt(tSec: number, cuts: number[]): number {
+  return cuts.filter((cut) => cut <= tSec).length;
+}
+
+/**
+ * Moving average of the selected positions, never across a camera cut:
+ * averaging the last point of one shot with the first of the next puts the
+ * frame halfway between two faces, on neither.
+ */
+function smoothPoints(points: SelectedPoint[], window: number, cuts: number[] = []): SelectedPoint[] {
   if (window <= 1 || points.length <= 1) return points;
   const half = Math.floor(window / 2);
+  const shots = points.map((point) => shotIndexAt(point.tSec, cuts));
   return points.map((point, i) => {
-    const start = Math.max(0, i - half);
-    const end = Math.min(points.length - 1, i + half);
+    let start = Math.max(0, i - half);
+    let end = Math.min(points.length - 1, i + half);
+    while (shots[start] !== shots[i]) start++;
+    while (shots[end] !== shots[i]) end--;
     let sumX = 0;
     let sumY = 0;
     let count = 0;
@@ -118,12 +131,15 @@ export class LocalSubjectTracker implements FrameTracker {
     }
     await assertLocalFileExists(input.mediaPath);
 
-    const detections = await this.engine.detect({
+    const detectionInput = {
       mediaPath: input.mediaPath,
       sourceWidth: input.sourceWidth,
       sourceHeight: input.sourceHeight,
       durationSec: input.durationSec,
-    });
+    };
+    const { detections, cuts } = this.engine.detectScene
+      ? await this.engine.detectScene(detectionInput)
+      : { detections: await this.engine.detect(detectionInput), cuts: [] as number[] };
 
     if (detections.length === 0) {
       const durationSec = Math.max(0, input.durationSec);
@@ -138,6 +154,7 @@ export class LocalSubjectTracker implements FrameTracker {
         fallbackUsed: true,
         method: "local-subject-no-detections-fallback",
         subjects: [],
+        cuts,
       };
     }
 
@@ -169,7 +186,7 @@ export class LocalSubjectTracker implements FrameTracker {
       MAX_SMOOTHING_WINDOW,
       Math.max(MIN_SMOOTHING_WINDOW, Math.round(this.options.smoothingWindow ?? DEFAULT_SMOOTHING_WINDOW))
     );
-    const smoothed = smoothPoints(rawPoints, window);
+    const smoothed = smoothPoints(rawPoints, window, cuts);
 
     const keyframes: TrackingKeyframe[] = smoothed.map((p) => ({
       tSec: p.tSec,
@@ -184,9 +201,11 @@ export class LocalSubjectTracker implements FrameTracker {
       method: "local-subject-detection",
       // The keyframes follow one subject; this keeps all of them, which is
       // what framing a clip on whoever is speaking needs (see
-      // buildSpeakerFraming). Grouping happens here rather than in the
+      // buildFaceFraming). Grouping happens here rather than in the
       // caller because this is the only layer that sees every detection.
       subjects: groupSubjectTracks(detections),
+      cuts,
+      detections,
     };
   }
 }

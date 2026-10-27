@@ -47,7 +47,7 @@ describe("buildAutoPipelineChain", () => {
   });
 
   it("covers every kind of the declared pipeline order", () => {
-    expect(buildAutoPipelineChain(AUTO_PIPELINE_ORDER[0], { providerId: "openai" })).toHaveLength(
+    expect(buildAutoPipelineChain(AUTO_PIPELINE_ORDER[0], { providerId: "openai", motion: true })).toHaveLength(
       AUTO_PIPELINE_ORDER.length - 1
     );
   });
@@ -122,5 +122,14 @@ describe("nextChainedJob", () => {
     const payload = attachChain({}, [{ kind: "analysis", payload: {} }]);
     expect(nextChainedJob({ id: "a", payload })?.idempotencyKey).toBe("chain:a");
     expect(nextChainedJob({ id: "b", payload })?.idempotencyKey).toBe("chain:b");
+  });
+});
+
+describe("buildAutoPipelineChain — Claude Motion", () => {
+  it("closes the pipeline with the motion step only when the server says Claude is configured", () => {
+    const kinds = (motion: boolean) =>
+      buildAutoPipelineChain("analysis", { motion }).map((step) => step.kind);
+    expect(kinds(true)).toEqual(["tracking", "motion"]);
+    expect(kinds(false)).toEqual(["tracking"]);
   });
 });

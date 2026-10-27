@@ -23,9 +23,9 @@ export const PREVIEW_MAX_DURATION_SEC = 20;
 export const PREVIEW_WATERMARK_TEXT = "PeakCut \u00B7 Aper\u00E7u gratuit";
 
 export class PreviewDurationExceededError extends Error {
-  constructor(requestedSec: number) {
+  constructor(requestedSec: number, maxDurationSec: number = PREVIEW_MAX_DURATION_SEC) {
     super(
-      `L'aperçu gratuit est limité à ${PREVIEW_MAX_DURATION_SEC}s (demandé : ${requestedSec.toFixed(1)}s).`
+      `L'aperçu gratuit est limité à ${maxDurationSec}s (demandé : ${requestedSec.toFixed(1)}s).`
     );
     this.name = "PreviewDurationExceededError";
   }
@@ -57,6 +57,12 @@ export interface RenderPreviewSegmentInput {
    * must show the same edit the export will, illustrations included.
    */
   overlayFiles?: Record<string, string>;
+  /**
+   * Longest window this preview may cover; defaults to the free tier's
+   * PREVIEW_MAX_DURATION_SEC. An account previews a whole clip, and the
+   * route that knows who is asking raises it accordingly.
+   */
+  maxDurationSec?: number;
 }
 
 export interface RenderPreviewSegmentResult {
@@ -274,19 +280,23 @@ function previewOverlayArgs(
 
 export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Promise<RenderPreviewSegmentResult> {
   const { inputMediaPath, startSec, endSec, outputPath, crop, words, renderPlan, overlayFiles } = input;
+  const maxDurationSec = input.maxDurationSec ?? PREVIEW_MAX_DURATION_SEC;
   if (!(endSec > startSec)) {
     throw new Error("endSec doit être strictement supérieur à startSec.");
   }
   const durationSec = endSec - startSec;
-  if (durationSec > PREVIEW_MAX_DURATION_SEC) {
-    throw new PreviewDurationExceededError(durationSec);
+  if (durationSec > maxDurationSec) {
+    throw new PreviewDurationExceededError(durationSec, maxDurationSec);
   }
 
   const planIsValid = Boolean(renderPlan) && validateRenderPlan(renderPlan!).ok;
   const segmentWords = (words ?? []).filter((w) => w.startSec >= startSec && w.startSec < endSec);
 
+  const motionCards = planIsValid && renderPlan ? (renderPlan.motion ?? []) : [];
   let assPath: string | null = null;
-  if (segmentWords.length > 0) {
+  // The track carries the captions and the Claude Motion cards: either is
+  // reason enough to burn it in.
+  if (segmentWords.length > 0 || motionCards.length > 0) {
     assPath = outputPath.replace(/\.[^.]+$/, "") + ".ass";
     await writeFile(
       assPath,
@@ -300,6 +310,7 @@ export async function renderPreviewSegment(input: RenderPreviewSegmentInput): Pr
               primaryColorHex: renderPlan.subtitleStyle.primaryColorHex,
               marginVerticalScale: renderPlan.subtitleStyle.marginVerticalScale,
               emphasizeKeywords: renderPlan.subtitleStyle.emphasizeKeywords,
+              motionCards,
             }
           : {}),
       }),

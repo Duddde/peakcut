@@ -1,5 +1,5 @@
 import { parseJobListResponse, parseJobResponse, type ParsedJob } from "./parseJobResponse";
-import type { AutoPipelineOptions } from "./chain";
+import { readChainSteps, type AutoPipelineOptions } from "./chain";
 import type { JobKind, JobStatus } from "./types";
 
 export class JobClientError extends Error {
@@ -212,26 +212,54 @@ export async function runPipeline(
   params: EnqueueJobParams,
   options: RunPipelineOptions = {}
 ): Promise<ParsedJob[]> {
-  const { onStep, chainLookupAttempts = 20, ...jobOptions } = options;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const intervalMs = options.intervalMs ?? 1500;
-
-  const steps: ParsedJob[] = [];
-  let current = await runJob(params, {
+  const { onStep, chainLookupAttempts: _lookups, ...jobOptions } = options;
+  const first = await runJob(params, {
     ...jobOptions,
     onUpdate: (job) => {
       options.onUpdate?.(job);
       onStep?.(job);
     },
   });
+  return followPipeline(params.projectId, first, options);
+}
+
+/**
+ * Follows a pipeline whose first job was enqueued elsewhere — by
+ * /api/download-youtube, when a pasted link starts the whole chain — and
+ * resolves with every step it ran, `first` included, exactly like
+ * runPipeline. `first` may still be running.
+ */
+export async function followPipeline(
+  projectId: string,
+  first: ParsedJob,
+  options: RunPipelineOptions = {}
+): Promise<ParsedJob[]> {
+  const { onStep, chainLookupAttempts = 20, ...jobOptions } = options;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const intervalMs = options.intervalMs ?? 1500;
+
+  const steps: ParsedJob[] = [];
+  onStep?.(first);
+  let current = TERMINAL_STATUSES.includes(first.status)
+    ? first
+    : await pollJobUntilDone(first.id, {
+        ...jobOptions,
+        onUpdate: (job) => {
+          options.onUpdate?.(job);
+          onStep?.(job);
+        },
+      });
   steps.push(current);
 
-  while (current.status === "succeeded") {
+  // A job whose payload carries no remaining step was the last one: there
+  // is no continuation to wait for, and looking for one would hold the UI
+  // for chainLookupAttempts × intervalMs after the work is already done.
+  while (current.status === "succeeded" && readChainSteps(current.payload).length > 0) {
     if (options.signal?.aborted) break;
 
     let next: ParsedJob | null = null;
     for (let attempt = 0; attempt < chainLookupAttempts && !next; attempt++) {
-      next = await fetchChainedJobOf(params.projectId, current.id, fetchImpl);
+      next = await fetchChainedJobOf(projectId, current.id, fetchImpl);
       if (!next) await sleep(intervalMs, options.signal);
       if (options.signal?.aborted) break;
     }

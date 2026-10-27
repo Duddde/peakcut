@@ -17,12 +17,17 @@ import { SqliteAssetRepository } from "@/lib/assets/AssetRepository";
 import { defaultAssetsBaseDir } from "@/lib/assets/assetStore";
 import { resolveOverlayFiles } from "@/lib/assets/resolveOverlayFiles";
 import { getExportBlockReasons } from "@/lib/workflow/exportGate";
+import { isRightsConfirmationRequired } from "@/lib/workflow/rightsConfirmation";
 import { StableCenterFrameTracker } from "@/lib/tracking/StableCenterFrameTracker";
 import { LocalSubjectTracker } from "@/lib/tracking/LocalSubjectTracker";
 import { AutoSubjectDetectionEngine } from "@/lib/tracking/AutoSubjectDetectionEngine";
-import { deriveCropFromTrack } from "@/lib/tracking/deriveCropFromTrack";
-import { assignSpeakersToFaces } from "@/lib/tracking/assignSpeakersToFaces";
-import { buildSpeakerFraming } from "@/lib/tracking/buildSpeakerFraming";
+import { cropRectAround, deriveCropFromTrack } from "@/lib/tracking/deriveCropFromTrack";
+import { buildFaceFraming } from "@/lib/tracking/buildFaceFraming";
+import { readAudioEnvelope, type ReadAudioEnvelope } from "@/lib/ffmpeg/audioEnvelope";
+import { snapClipToAudio } from "@/lib/analysis/snapClipToAudio";
+import { retimeSegment } from "@/lib/analysis/retimeSegment";
+import { ClaudeMotionDesigner } from "@/lib/motion/ClaudeMotionDesigner";
+import type { MotionCard } from "@/lib/motion/types";
 import { speechTurnsFromWords } from "@/lib/tracking/speechTurns";
 import { EXPORT_HEIGHT, EXPORT_WIDTH } from "@/lib/ffmpeg/exportSpec";
 import type { FrameTracker } from "@/lib/tracking/types";
@@ -65,6 +70,12 @@ export interface DefaultJobHandlersDeps {
   trialVideoDownloader?: VideoDownloader;
   trialLimits?: PublicTrialLimits;
   now?: () => number;
+  /** Injected in tests; defaults to isRightsConfirmationRequired() — the gate is off only under `next dev`. */
+  rightsConfirmationRequired?: boolean;
+  /** Injected in tests; defaults to reading the media's audio through ffmpeg. */
+  readAudioEnvelope?: ReadAudioEnvelope;
+  /** Injected in tests; defaults to Claude, with the environment's credentials. */
+  motionDesigner?: Pick<ClaudeMotionDesigner, "design">;
 }
 
 /**
@@ -266,12 +277,44 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       );
     }
 
-    const baseSegments: Segment[] =
-      project.segments.length > 0 && !resegment
-        ? project.segments
-        : project.transcript
-          ? buildCandidateSegments(project.id, project.transcript.words, nowMs())
-          : [];
+    const keepExisting = project.segments.length > 0 && !resegment;
+    let baseSegments: Segment[] = keepExisting
+      ? project.segments
+      : project.transcript
+        ? buildCandidateSegments(project.id, project.transcript.words, nowMs())
+        : [];
+
+    // Freshly cut clips have their bounds moved onto the audio's pauses
+    // (see snapClipToAudio). Clips an editor already has are left exactly
+    // where they were put.
+    const mediaPath = project.source.localFilePath;
+    if (!keepExisting && mediaPath && baseSegments.length > 0) {
+      const transcript = project.transcript;
+      const readEnvelope = deps.readAudioEnvelope ?? readAudioEnvelope;
+      baseSegments = await Promise.all(
+        baseSegments.map(async (segment) => {
+          try {
+            const bounds = await snapClipToAudio(mediaPath, segment, readEnvelope, project.source.durationSec);
+            const retimed = retimeSegment(segment, { ...bounds, transcript });
+            // The plan is drawn again for the final bounds rather than
+            // shifted: shifting would keep the old kept-range, which starts
+            // after the breath the snap just added, and leave it unplayed.
+            return {
+              ...retimed,
+              renderPlan: defaultRenderPlanFor({
+                segmentId: retimed.id,
+                startSec: retimed.startSec,
+                endSec: retimed.endSec,
+                words: retimed.words,
+              }),
+            };
+          } catch {
+            // Without readable audio the transcript's own bounds still stand.
+            return segment;
+          }
+        })
+      );
+    }
 
     const scored = baseSegments.map((segment) => {
       const score = scoreSegment({ words: segment.words, startSec: segment.startSec, endSec: segment.endSec });
@@ -313,29 +356,20 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     const sourceHeight = probed.height ?? 1080;
 
     /**
-     * Matching each voice to a face, once for the whole video rather than
-     * per clip: a speaker is the same person throughout, and the
-     * detection samples of one 60-second clip are rarely enough to tell
-     * two faces apart. The result is then applied clip by clip below.
+     * Each clip is framed shot by shot on the face of whoever is talking
+     * (see buildFaceFraming): one face on screen is the one framed, and
+     * between several, the one whose mouth moves while someone speaks. The
+     * transcript only says *when* someone speaks; without one, a clip with
+     * a single face per camera shot is still framed on it.
      *
-     * `reasons` is kept and returned even when it is the only output —
-     * "no shots, and here is why" is the answer a user needs when their
-     * clip is not framed on the speaker, and it is the one thing a
-     * silent fallback would never tell them.
+     * The notes are returned even when they are the only output — "no
+     * shots, and here is why" is what a user needs when a clip is not
+     * framed as they expected.
      */
     const subjects = track.subjects ?? [];
+    const detections = track.detections ?? subjects.flatMap((subject) => subject.boxes);
+    const cuts = track.cuts ?? [];
     const turns = project.transcript ? speechTurnsFromWords(project.transcript.words) : [];
-    const assignment =
-      subjects.length > 0 && turns.length > 0
-        ? assignSpeakersToFaces(subjects, turns)
-        : {
-            bySpeaker: {},
-            reasons: [
-              project.transcript
-                ? "Aucun sujet suivi dans la détection : le cadrage ne peut pas suivre le locuteur."
-                : "Aucune transcription diarisée sur ce projet : sans savoir qui parle quand, le cadrage ne peut pas suivre le locuteur. Lancez un job de transcription.",
-            ],
-          };
 
     const framingNotes: string[] = [];
     let framedSegments = 0;
@@ -343,23 +377,16 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     let updatedSegments: Segment[] | null = null;
     if (project.segments.length > 0) {
       updatedSegments = project.segments.map((segment) => {
-        const atSec = segment.startSec + (segment.endSec - segment.startSec) / 2;
-        const variants = segment.variants.map((variant) => {
-          const [w, h] = variant.aspectRatio.split(":").map(Number);
-          const crop = deriveCropFromTrack(track, { targetAspect: w / h, sourceWidth, sourceHeight, atSec });
-          return { ...variant, crop };
-        });
-
         // Shots are sized for what the export actually produces (a
         // 1080x1920 clip), not for the variant that happens to be first:
         // a variant is a different crop of the source, the export is one
         // vertical frame either way.
         const framing =
-          segment.renderPlan && Object.keys(assignment.bySpeaker).length > 0
-            ? buildSpeakerFraming({
-                tracks: subjects,
+          providerId === "local-subject"
+            ? buildFaceFraming({
+                detections,
+                cuts,
                 turns,
-                assignment,
                 clipStartSec: segment.startSec,
                 clipEndSec: segment.endSec,
                 targetAspect: EXPORT_WIDTH / EXPORT_HEIGHT,
@@ -367,11 +394,23 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
                 sourceHeight,
               })
             : null;
-
         if (framing) {
           framingNotes.push(...framing.notes.map((note) => `${segment.id} : ${note}`));
           if (framing.shots.length > 0) framedSegments++;
         }
+
+        // The static crop of every variant sits where the frame is for
+        // most of the clip — on a face, rather than wherever the tracked
+        // subject happened to be at the clip's midpoint.
+        const atSec = segment.startSec + (segment.endSec - segment.startSec) / 2;
+        const variants = segment.variants.map((variant) => {
+          const [w, h] = variant.aspectRatio.split(":").map(Number);
+          const params = { targetAspect: w / h, sourceWidth, sourceHeight };
+          const crop = framing?.dominantCenter
+            ? cropRectAround(framing.dominantCenter.cx, framing.dominantCenter.cy, params)
+            : deriveCropFromTrack(track, { ...params, atSec });
+          return { ...variant, crop };
+        });
 
         return {
           ...segment,
@@ -394,7 +433,7 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     // intermediate measurement nobody downstream acts on. What came of
     // it — the shots, and the reasons when there are none — is reported
     // instead, and the keyframes are still there exactly as before.
-    const { subjects: _subjects, ...trackForResult } = track;
+    const { subjects: _subjects, detections: _detections, ...trackForResult } = track;
 
     return {
       providerId,
@@ -402,9 +441,8 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       subjectsDetected: subjects.length,
       appliedToSegments: updatedSegments !== null,
       speakerFraming: {
-        assignedSpeakers: Object.keys(assignment.bySpeaker).length,
+        cutsDetected: cuts.length,
         framedSegments,
-        reasons: assignment.reasons,
         notes: framingNotes,
       },
     };
@@ -424,6 +462,7 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
       hasLocalMediaFile: true,
       segmentEndSec: segment.endSec,
       sourceDurationSec: project.source.durationSec,
+      rightsConfirmationRequired: deps.rightsConfirmationRequired ?? isRightsConfirmationRequired(),
     });
     if (blockReasons.length > 0) {
       throw new Error(`Export non autorisé : ${blockReasons.join(" ")}`);
@@ -534,11 +573,64 @@ export function createDefaultJobHandlers(deps: DefaultJobHandlersDeps): JobHandl
     };
   };
 
+  /**
+   * Claude Motion: Claude designs the animated cards of each clip (or of
+   * `payload.segmentId` alone) from what is said in it, and they are saved
+   * onto the clip's plan, replacing the cards it had. A clip without a
+   * plan has nothing to carry them and is skipped.
+   */
+  const motion: JobHandler = async ({ job, reportProgress }) => {
+    const project = loadProjectOrThrow(projectRepo, job.projectId);
+    const payload = job.payload as { segmentId?: unknown };
+    const only = typeof payload.segmentId === "string" ? payload.segmentId : null;
+    if (only) findSegmentOrThrow(project, only);
+    const designer = deps.motionDesigner ?? new ClaudeMotionDesigner();
+    const words = project.transcript?.words ?? [];
+
+    const targets = project.segments.filter((segment) => segment.renderPlan && (!only || segment.id === only));
+    const cardsBySegment: Record<string, MotionCard[]> = {};
+    let done = 0;
+    // A few clips at a time: each is one request, and a project has a handful.
+    const queue = [...targets];
+    const workerCount = Math.min(3, queue.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        for (let segment = queue.shift(); segment; segment = queue.shift()) {
+          cardsBySegment[segment.id] = await designer.design({
+            words: words.length > 0 ? words : segment.words,
+            clipStartSec: segment.startSec,
+            clipEndSec: segment.endSec,
+            title: segment.title,
+          });
+          reportProgress(Math.round((++done / targets.length) * 95));
+        }
+      })
+    );
+
+    // Re-read before writing: the clips may have been edited while Claude
+    // was working, and only their cards are this job's to change.
+    const current = loadProjectOrThrow(projectRepo, job.projectId);
+    if (job.projectId) {
+      projectRepo.updateProject(job.projectId, {
+        ...current,
+        segments: current.segments.map((segment) =>
+          cardsBySegment[segment.id] && segment.renderPlan
+            ? { ...segment, renderPlan: { ...segment.renderPlan, motion: cardsBySegment[segment.id] } }
+            : segment
+        ),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    reportProgress(100);
+    return { cardsBySegment };
+  };
+
   return {
     download: refuseExpiredTrial(download),
     transcription: refuseExpiredTrial(transcription),
     analysis: refuseExpiredTrial(analysis),
     tracking: refuseExpiredTrial(tracking),
     render: refuseExpiredTrial(render),
+    motion: refuseExpiredTrial(motion),
   };
 }

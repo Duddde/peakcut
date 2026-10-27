@@ -54,6 +54,23 @@ describe("getExportBlockReasons", () => {
   });
 });
 
+describe("getExportBlockReasons without the rights gate", () => {
+  it("drops the rights and authorization reasons, and only those", () => {
+    expect(getExportBlockReasons({ ...baseParams(), rightsConfirmationRequired: false })).toEqual([]);
+    const reasons = getExportBlockReasons({
+      ...baseParams(),
+      rightsConfirmationRequired: false,
+      hasLocalMediaFile: false,
+    });
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatch(/fichier média/i);
+  });
+
+  it("keeps the gate when the flag is left out", () => {
+    expect(getExportBlockReasons(baseParams()).length).toBeGreaterThan(0);
+  });
+});
+
 describe("canExportSegment", () => {
   it("mirrors getExportBlockReasons emptiness", () => {
     const workflow = authorizeExport(confirmRights(createInitialWorkflow(), "someone"));

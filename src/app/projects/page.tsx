@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AccountGate } from "@/components/AccountGate";
 import { listDemoProjectSummaries, type DemoProjectSummary } from "@/lib/demo/demoProjects";
+import { validateYoutubeUrl } from "@/lib/youtube/validateYoutubeUrl";
 
 type ProjectSummary = {
   id: string;
@@ -38,6 +39,8 @@ export default function ProjectsPage() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAccountGate, setShowAccountGate] = useState(false);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [startingFromUrl, setStartingFromUrl] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -72,27 +75,55 @@ export default function ProjectsPage() {
     };
   }, []);
 
-  async function createProject() {
+  /** The new project's id, or null when it could not be created (the reason is already shown). */
+  async function postProject(title: string): Promise<string | null> {
     if (!authenticated) {
       setShowAccountGate(true);
-      return;
+      return null;
     }
     const response = await fetch("/api/projects", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Nouveau projet PeakCut" }),
+      body: JSON.stringify({ title }),
     });
     if (response.status === 401) {
       setAuthenticated(false);
       setShowAccountGate(true);
-      return;
+      return null;
     }
     const json = await response.json();
     if (!response.ok || !json.ok) {
       setError(json.error ?? "Impossible de créer le projet.");
+      return null;
+    }
+    return json.project.id as string;
+  }
+
+  async function createProject() {
+    const id = await postProject("Nouveau projet PeakCut");
+    if (id) router.push(`/projects/${id}`);
+  }
+
+  /**
+   * Paste a link, get clips: the project is created here and the studio
+   * starts the whole pipeline on the link it receives (`?url=`), so there
+   * is nothing left to click on the way.
+   */
+  async function startFromYoutubeUrl(rawUrl: string) {
+    const validation = validateYoutubeUrl(rawUrl.trim());
+    if (!validation.ok) {
+      setError(validation.error);
       return;
     }
-    router.push(`/projects/${json.project.id}`);
+    if (startingFromUrl) return;
+    setStartingFromUrl(true);
+    setError(null);
+    const id = await postProject(`YouTube ${validation.videoId}`);
+    if (!id) {
+      setStartingFromUrl(false);
+      return;
+    }
+    router.push(`/projects/${id}?url=${encodeURIComponent(validation.normalizedUrl)}`);
   }
 
   return (
@@ -134,6 +165,52 @@ export default function ProjectsPage() {
               Se connecter
             </a>
           </section>
+        )}
+
+        {authenticated && (
+          <form
+            aria-label="Nouveau projet depuis un lien YouTube"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startFromYoutubeUrl(youtubeUrl);
+            }}
+            className="mt-8 space-y-3 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-5"
+          >
+            <label htmlFor="projects-youtube-url" className="block text-sm font-semibold text-amber-100">
+              Collez un lien YouTube : les clips se préparent tout seuls
+            </label>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                id="projects-youtube-url"
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                placeholder="https://www.youtube.com/watch?v=..."
+                value={youtubeUrl}
+                disabled={startingFromUrl}
+                onChange={(event) => setYoutubeUrl(event.target.value)}
+                onPaste={(event) => {
+                  const pasted = event.clipboardData.getData("text").trim();
+                  if (!validateYoutubeUrl(pasted).ok) return;
+                  event.preventDefault();
+                  setYoutubeUrl(pasted);
+                  void startFromYoutubeUrl(pasted);
+                }}
+                className="w-full flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none ring-amber-400/50 transition focus:border-amber-400/60 focus:ring-2"
+              />
+              <button
+                type="submit"
+                disabled={startingFromUrl || youtubeUrl.trim().length === 0}
+                className="shrink-0 rounded-xl bg-amber-400 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {startingFromUrl ? "Création…" : "Lancer"}
+              </button>
+            </div>
+            <p className="text-xs text-zinc-400">
+              Téléchargement, transcription, découpage en clips, cadrage sur celui qui parle, puis aperçu du
+              meilleur clip — sans autre clic.
+            </p>
+          </form>
         )}
 
         {error && <p role="alert" className="mt-8 rounded-xl border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-200">{error}</p>}

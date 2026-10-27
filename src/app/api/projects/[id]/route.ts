@@ -5,6 +5,8 @@ import { getRequestActorAsync, PUBLIC_TRIAL_ACCESS } from "@/lib/auth/getAuthent
 import { describePublicTrialLimits } from "@/lib/publicTrial/config";
 import { SqliteProjectRepository } from "@/lib/db/ProjectRepository";
 import { ProjectInputParseError, parseProjectUpdateInput } from "@/lib/db/parseProjectInput";
+import { isRightsConfirmationRequired } from "@/lib/workflow/rightsConfirmation";
+import { isClaudeMotionConfigured } from "@/lib/motion/ClaudeMotionDesigner";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -47,15 +49,22 @@ export function createProjectGetHandler(injectedDeps?: AppDeps) {
     if (ownershipError) return ownershipError;
 
     const project = repo.getProjectById(id);
+    // Tells the studio whether to ask for the rights attestation at all;
+    // the render job applies the very same rule server-side.
+    const rightsConfirmationRequired = isRightsConfirmationRequired();
+    // A trial never spends the operator's Anthropic account.
+    const claudeMotionConfigured = actor.kind !== "trial" && isClaudeMotionConfigured();
     if (actor.kind === "trial") {
       return NextResponse.json({
         ok: true,
         project,
         access: "trial",
         trial: { expiresAt: actor.expiresAt, limits: describePublicTrialLimits() },
+        rightsConfirmationRequired,
+        claudeMotionConfigured,
       });
     }
-    return NextResponse.json({ ok: true, project, access: "account" });
+    return NextResponse.json({ ok: true, project, access: "account", rightsConfirmationRequired, claudeMotionConfigured });
   };
 }
 
